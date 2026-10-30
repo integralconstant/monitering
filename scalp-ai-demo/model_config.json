@@ -1,0 +1,66 @@
+{
+  "models": [
+    {
+      "id": "flakes",
+      "name": "각질",
+      "filename": "7_4level_fold0_각질.pth",
+      "architecture": "vit_base_patch16_dinov3",
+      "num_classes": 4,
+      "input_size": 256,
+      "resize_size": 256,
+      "interpolation": "bicubic",
+      "mean": [0.485, 0.456, 0.406],
+      "std": [0.229, 0.224, 0.225],
+      "pooling": "cls_mean",
+      "head_activation": "identity",
+      "labels": null,
+      "settings_verified": false
+    },
+    {
+      "id": "sebum",
+      "name": "피지과다",
+      "filename": "best_v3_피지과다.pth",
+      "architecture": "vit_base_patch16_dinov3",
+      "num_classes": 3,
+      "input_size": 256,
+      "resize_size": 256,
+      "interpolation": "bicubic",
+      "mean": [0.485, 0.456, 0.406],
+      "std": [0.229, 0.224, 0.225],
+      "pooling": "cls_mean",
+      "head_activation": "identity",
+      "labels": null,
+      "settings_verified": false
+    },
+    {
+      "id": "hair_loss",
+      "name": "탈모 여부",
+      "filename": "best_model_v11_augment_탈모.pth",
+      "architecture": "efficientnet_b4",
+      "num_classes": 3,
+      "input_size": 380,
+      "resize_size": 384,
+      "interpolation": "bicubic",
+      "mean": [0.485, 0.456, 0.406],
+      "std": [0.229, 0.224, 0.225],
+      "labels": null,
+      "settings_verified": false
+    },
+    {
+      "id": "erythema",
+      "name": "모낭사이홍반",
+      "filename": "FINAL_3CLASS_p010_fold0_모낭사이홍반.pth",
+      "architecture": "vit_base_patch14_dinov2",
+      "num_classes": 3,
+      "input_size": 392,
+      "resize_size": 392,
+      "interpolation": "bicubic",
+      "mean": [0.485, 0.456, 0.406],
+      "std": [0.229, 0.224, 0.225],
+      "pooling": "cls_mean",
+      "head_activation": "identity",
+      "labels": null,
+      "settings_verified": false
+    }
+  ]
+}

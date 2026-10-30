@@ -1,0 +1,7 @@
+scalp-ai-demo/.venv/
+**/__pycache__/
+*.py[cod]
+*.pth
+scalp-ai-demo/.runtime/
+scalp-ai-demo/models/
+scalp-ai-demo/test-results/

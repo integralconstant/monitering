@@ -1,100 +1,105 @@
-# 딥러닝 기반 ai 두피 관리 서비스 — Tech-Fair 2026 시연용 웹
+# 딥러닝 기반 ai 두피 관리 서비스
 
-대림대학교 · 2026 대림대학교 창의융합 전공동아리 · 지공모
+두피 사진 1~3장을 업로드하면 제공된 PyTorch 모델 4개를 실행합니다. Flask API와 기존 HTML/CSS/JavaScript 웹을 같은 주소에서 제공합니다.
 
-- 작품명: 딥러닝 기반 ai 두피 관리 서비스
-- 팀원: 연일, 이승철, 김진형
-- 지도교수: 김영실, 박상윤
+**실제 가중치 로드와 추론은 연결됐습니다. 다만 학습 코드가 없어 전처리·DINO 특징 결합·클래스 의미는 미확인입니다. 현재 결과는 임시 추론 설정의 클래스 번호와 모델 점수이며, 정상/중증 또는 탈모 유무로 해석하면 안 됩니다.**
 
-## 파일로 전달하고 시연하기
+## 실행
 
-현재 우선 목표는 기기 간에 파일을 전달해 실행하는 오프라인 시연입니다.
+현재 PC에는 프로젝트 `.venv`에 의존성이 설치돼 있습니다. `start.cmd`를 더블클릭하거나 이 폴더의 PowerShell에서 실행하세요.
 
-1. `releases/scalp-ai-offline.zip`을 USB·메신저 등으로 전달합니다.
-2. 받은 기기에서 ZIP 전체를 압축 해제합니다.
-3. `scalp-ai-offline` 폴더의 `index.html`을 웹 브라우저로 엽니다.
+~~~powershell
+powershell -ExecutionPolicy Bypass -File .\start.ps1
+~~~
 
-`releases/scalp-ai-offline.html` 하나만 전달해 브라우저로 열어도 됩니다. 이 파일 안에 화면 코드, 글꼴, 샘플 이미지가 모두 들어 있습니다. 받는 기기에는 Python·Node·VS Code 설치나 서버 실행이 필요하지 않으며, 인터넷 연결 없이 사용할 수 있습니다. ZIP에는 실행 안내와 글꼴 권리 안내도 함께 포함됩니다.
+브라우저 주소: **http://127.0.0.1:8000**
 
-파일은 브라우저로 직접 열어 주세요. 메신저의 첨부파일 미리보기는 시연 실행 환경으로 사용하지 않습니다. 휴대폰·태블릿에서의 실행은 아직 확인하지 않았습니다.
+**사진 준비 → 사진 선택 → 확인 후 분석** 순서로 안내합니다. 촬영 안내를 확인하고 JPG/PNG/WEBP 사진을 1~3장 고른 뒤, 마지막 확인 화면에서 **사진 N장 분석하기**를 누르세요. 여러 장 선택과 끌어 놓기를 지원하며, 분석 버튼을 누르기 전에는 사진을 전송하지 않습니다. 단계 사이를 이동하거나 분석이 실패해도 선택한 사진은 유지됩니다.
 
-### 수정한 내용을 시연 파일에 반영하기
+결과 화면에서는 항목별 참고번호와 쉬운 해석 안내를 먼저 보여 줍니다. 클래스별 점수와 사진별 출력은 **분석 수치 자세히 보기**에서 확인하세요. **오늘의 결과 저장하기**를 누르면 같은 브라우저의 **내 기록**에서 다시 열 수 있습니다. 기록 그래프도 상세 보기에 접어 두었습니다. 이전 테스트용 대시보드와 사이드바는 새 UI로 교체했습니다.
 
-개발자는 `dist/`의 소스를 수정한 뒤 프로젝트 폴더에서 다음 명령을 실행합니다.
+`dist/index.html` 직접 열기, Live Server, `python -m http.server`는 AI 서버를 실행하지 않습니다. 정적 HTML만 다른 PC로 전달해도 AI는 실행되지 않습니다. 새 PC에서는 Python 3.11~3.14와 모델 파일을 준비하고 최초 한 번 설치합니다.
 
-```sh
-python scripts/package_demo.py
-```
+~~~powershell
+powershell -ExecutionPolicy Bypass -File .\setup.ps1
+powershell -ExecutionPolicy Bypass -File .\start.ps1
+~~~
 
-Windows에서 `python` 명령을 사용할 수 없다면 `py scripts/package_demo.py`를 사용하세요. 패키징에는 Python 표준 라이브러리만 사용하며, 생성된 `releases/scalp-ai-offline.html`과 `releases/scalp-ai-offline.zip`을 전달합니다. 생성 파일을 직접 수정하기보다 소스 수정 후 다시 생성하세요.
+설치는 별도 가상환경에 CPU용 PyTorch/torchvision과 `requirements.txt`를 설치하며, 모델을 다운로드하지 않습니다. 포트 변경: `start.ps1 -Port 8001`. 종료: 서버 터미널 Ctrl+C. 기본 접속 범위는 이 PC뿐입니다.
 
-### 개발 중 미리보기
+## 모델 위치
 
-`dist/index.html`을 브라우저로 직접 열어 확인할 수 있습니다. 개발 중에는 VS Code Live Server 또는 다음 로컬 서버를 선택적으로 사용할 수 있습니다.
+| 항목 | 가중치 | 확인된 구조 | 출력 수 |
+|---|---|---|---:|
+| 각질 | `7_4level_fold0_각질.pth` | DINOv3 ViT-B/16 + 1536차원 head | 4 |
+| 피지과다 | `best_v3_피지과다.pth` | DINOv3 ViT-B/16 + 1536차원 head | 3 |
+| 탈모 여부 | `best_model_v11_augment_탈모.pth` | EfficientNet-B4 | 3 |
+| 모낭사이홍반 | `FINAL_3CLASS_p010_fold0_모낭사이홍반.pth` | DINOv2 ViT-B/14 + 1536차원 head | 3 |
 
-```sh
-python -m http.server 5500 --directory dist
-```
+검색 순서: `SCALP_MODEL_DIR` 환경변수 → 이 프로젝트의 `models/`(4개 모두 있을 때) → 사용자 `Downloads/scalp_4indicator_models`. 현재 다운로드 폴더 원본을 읽으며 모델을 저장소에 복사하지 않습니다.
 
-Windows에서 python 명령이 없다면 `py -m http.server 5500 --directory dist`를 사용하세요.
-브라우저 주소: http://localhost:5500
+~~~powershell
+$env:SCALP_MODEL_DIR = 'D:\scalp_models'
+powershell -ExecutionPolicy Bypass -File .\start.ps1
+~~~
 
-소스 실행에도 별도 npm 설치는 필요하지 않습니다.
+`torch.load(weights_only=True)`와 `load_state_dict(strict=True)`를 사용합니다. 누락된 가중치나 로드 실패 시 분석을 차단합니다. 실패를 예시 결과로 대체하지 않습니다.
 
-## 기록과 파일 이동
+## 학습 설정 확인 후 수정
 
-- 기본 예시 기록 4개는 시연 파일에 포함됩니다.
-- 사용자가 저장한 날짜와 예시 등급은 실행한 브라우저에 저장되며, HTML·ZIP을 다른 기기로 보내도 함께 이동하지 않습니다.
-- 파일을 옮기거나 이름을 바꾸면 기존 기록이 보이지 않을 수 있습니다. 브라우저의 로컬 파일 저장 정책·설정에 따라 기록 저장이 제한될 수도 있습니다.
-- 시연 전에 사용할 기기에서 기록 저장과 캘린더 조회를 확인하세요. 저장이 허용되지 않으면 화면에 안내가 표시됩니다.
-- 선택한 사진과 체크리스트 상태는 영구 저장하지 않습니다. 사진은 서버로 전송하지 않습니다.
+`model_config.json`이 설정 원본입니다. .pth에는 클래스 이름이나 전처리 설정이 없습니다. 가중치 모양 일치만으로 학습 당시 forward와 동일함을 증명하지 못합니다.
 
-## 시연 동선
+| 설정 | 현재 임시값 | 확인할 내용 |
+|---|---|---|
+| 각질·피지 입력 | 짧은 변 256 → 중앙 crop 256 | 학습 transform의 크기·crop·보간법 |
+| 홍반 입력 | 짧은 변 392 → 중앙 crop 392 | 저장된 위치 임베딩은 28×28 격자. 학습 transform은 미확인 |
+| 탈모 입력 | 짧은 변 384 → 중앙 crop 380 | 상류 기본값이며 학습 transform은 미확인 |
+| 정규화 | ImageNet mean/std, bicubic | 실제 모델별 정규화·보간법 |
+| DINO 특징 | CLS 다음 patch 평균 연결 (`cls_mean`) | 결합 순서·정규화·register token 취급 |
+| DINO head | LayerNorm → Identity → Linear | 중간이 Dropout이면 eval 시 Identity와 동일하나 활성화 여부는 미확인 |
+| 클래스 | 클래스 0, 클래스 1… | 정확한 학습 label index 순서와 이름 |
 
-1. 두피 분석 화면에서 **샘플로 먼저 체험하기** → 결과 리포트 확인.
-2. 또는 **샘플 사진 사용** → **예시 리포트 보기**. 직접 3장을 선택할 수도 있습니다.
-3. 리포트에서 **이 브라우저에 기록 저장** → 관리 기록의 캘린더에서 날짜 선택.
-4. 맞춤 관리 화면에서 추천 유형과 체크리스트 확인.
-5. 리포트 인쇄 버튼으로 브라우저 인쇄 또는 PDF 저장.
+`pooling`: `cls_mean` 또는 `mean_cls`. `head_activation`: `identity`, `gelu`, `relu`. 학습 코드가 다르면 `inference.py`의 forward/head/transform도 실제 구현에 맞춰 수정해야 합니다.
 
-## 구현 범위
+확인한 클래스 이름을 `labels` 배열에 학습 출력 순서로 넣고, 전처리와 forward까지 확인했을 때만 `settings_verified: true`로 설정하세요. 미확인 상태에서는 labels를 임의로 입력해도 증상명으로 표시하지 않습니다. 설정 변경 후 서버 재시작이 필요합니다.
 
-실제로 작동하는 기능: 페이지 이동, 3장 이미지 선택/해제/미리보기, 파일 형식·10MB 용량 검사,
-고정 예시 리포트, 결과값 localStorage 저장, 기록 캘린더, 예시 그래프 기간 전환,
-저장 기록 삭제, 관리 체크리스트, 반응형 화면, 인쇄 스타일.
+상류 기본 설정 참고: [DINOv3 모델 설정](https://huggingface.co/timm/vit_base_patch16_dinov3.lvd1689m/blob/main/config.json), [EfficientNet-B4 공식 문서](https://docs.pytorch.org/vision/stable/models/generated/torchvision.models.efficientnet_b4.html). 이 자료는 사용자 학습 설정의 증거가 아닙니다.
 
-AI는 연결되어 있지 않습니다. 입력 사진과 무관하게 고정 예시 결과를 표시합니다.
-샘플 이미지는 두피를 표현한 SVG 일러스트이며 실제 촬영 사진이 아닙니다.
-그래프는 2026년 10월의 설명용 예시 기록 4개를 표시하며 실험 결과나 성능 평가가 아닙니다.
-회원가입, 로그인, 서버 DB, 실제 상품 추천, 의료 진단은 구현 범위에 포함되지 않습니다.
-사진은 서버로 전송하거나 localStorage에 저장하지 않습니다. 페이지를 새로고침하면 사진 선택이 해제됩니다.
-날짜와 예시 지표만 현재 브라우저에 저장됩니다.
+## 결과·저장
 
-## 소스 구조와 향후 실제 구현
+- 사진마다 logits에 softmax를 적용합니다. 여러 사진은 **클래스별 점수 평균**의 최댓값을 선택합니다. 기존 예시 화면의 중앙값 규칙은 사용하지 않습니다. 미확인 클래스를 순서형 등급으로 취급하지 않습니다.
+- 모델 점수는 보정된 질환 확률이나 정확도가 아닙니다. 실제 두피 사진과 정답으로 성능을 평가한 상태가 아닙니다.
+- 장당 최대 10MiB, 최대 3장, 장당 최대 2,000만 화소. 서버에서도 실제 이미지 형식과 디코딩을 검사합니다.
+- 사진은 서버 메모리에서만 처리합니다. Flask multipart와 Waitress 버퍼의 임시파일 저장을 막았습니다. 사진·원본 파일명은 기록에 저장하지 않습니다.
+- 날짜·클래스별 점수·사진별 출력·모델/설정 식별자만 localStorage `scalp-ai-model-records-v2`에 저장합니다. 예전 시연용 기록과 합치지 않으며 다른 PC·브라우저와 공유되지 않습니다.
+- 그래프는 동일 모델/설정의 실제 기록을 선택 월 또는 최근 7일로 조회합니다. y축은 모델 점수이며 증상 정도가 아닙니다.
 
-- `dist/app.js`: 지표, 예시 기록, 화면 템플릿, 시연 동작.
-- `dist/styles.css`: 민트·네이비 UI와 모바일/인쇄 레이아웃.
-- `dist/index.html`: 공통 레이아웃과 메뉴.
-- `dist/assets`: 폰트, 시연용 두피 일러스트.
-- `scripts/package_demo.py`: 소스를 단일 HTML과 전달용 ZIP으로 묶는 개발용 도구.
-- `releases/`: 다른 기기에 전달할 시연 파일.
+## 구성·API
 
-아래 내용은 파일 시연 이후의 개발 방향입니다.
-Flask로 전환할 때 `index.html`을 templates, CSS/JS/assets를 static으로 이동하고 경로를 조정할 수 있습니다.
-실제 AI 결과를 반환하는 API를 만든 뒤 `analyze` 동작의 고정 데이터를 API 응답으로 교체하세요.
-서버 저장 및 회원 권한, 3장 결과 종합 방식, 추천 기준은 실제 서비스 단계에서 구현·검증해야 합니다.
+| 파일/주소 | 역할 |
+|---|---|
+| `server.py` | 웹 제공, 업로드 검사, API 오류 처리 |
+| `inference.py` | 모델 로드·전처리·실제 추론·종합 |
+| `model_config.json` | 클래스 매핑과 전처리/forward 설정 |
+| `dist/` | 기존 디자인을 유지한 웹 |
+| `GET /api/health` | loading/ready/error, 모델별 상태 |
+| `POST /api/analyze` | multipart의 `photos` 필드 1~3개 |
+| `tests/test_api.py` | 업로드·오류·종합 계산 테스트 |
 
-## 포스터 / 영상 캡처
+모델 준비 전 503, 동시 분석 중 429, 잘못된 사진 400, 용량 초과 413을 반환합니다. 웹은 분석 중 입력 변경·중복 요청을 막고 180초 제한과 재시도를 제공합니다. 실패 원인은 서버 로그에서 확인합니다. CPU 기본 스레드는 최대 4개이며 `SCALP_THREADS`로 변경할 수 있습니다.
 
-`#analysis`, `#report`, `#history`, `#care` 주소로 각 화면에 바로 접근합니다.
-1440px 이상의 가로 화면에서 브라우저 확대 100%로 촬영하면 넉넉한 대시보드를 얻을 수 있습니다.
-데모 표시를 유지하고 실제 구현 완료나 정확도를 증명하는 화면으로 사용하지 마세요.
+## 검증
 
-## 폰트
+~~~powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+node --check dist\app.js
+~~~
 
-첨부받은 나눔고딕 글꼴을 사용합니다. 원본 글꼴의 저작권·라이선스 메타데이터를 그대로 보존했습니다.
+서버를 실행한 상태에서 실제 가중치를 사용하는 브라우저 검증:
 
+~~~powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe scripts\smoke_web.py
+~~~
 
-## Codex에서 이어서 작업
-
-같은 폴더의 CODEX_HANDOFF.md에 현재 파일 시연 우선 결정과 이전 웹 작업의 맥락이 정리되어 있습니다. 원본 소스의 WOFF 글꼴은 단일 HTML에도 포함됩니다.
+Chrome/Edge headless와 **합성 이미지**로 업로드 → 실제 4모델 추론 → 결과 일치 → 저장·새로고침·재조회 → 오류 처리를 확인합니다. 합성 이미지 결과는 두피 상태나 모델 정확도를 검증하는 자료가 아닙니다. 스크린샷은 `test-results/`에 저장합니다. `PLAYWRIGHT_CHROMIUM_EXECUTABLE`로 브라우저 경로를 지정할 수 있습니다.
