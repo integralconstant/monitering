@@ -141,6 +141,16 @@ def main():
         expect(page.locator('[data-action="analyze"]')).to_have_count(0)
         screenshot(page, output, "analysis-desktop.png")
 
+        # Skipping navigation must keep the current page and move focus to its content.
+        page.locator('[data-nav="care"]').click()
+        expect(page.locator("h1")).to_have_text("이렇게 찍으면 준비 끝이에요.")
+        page.locator(".skip-link").focus()
+        page.keyboard.press("Enter")
+        expect(page.locator("#main")).to_be_focused()
+        assert page.evaluate("location.hash") == "#care"
+        page.locator('[data-nav="analysis"]').click()
+        expect(page.locator('[data-action="next"]')).to_be_visible()
+
         # The first screen explains preparation; selecting files is a deliberate next step.
         next_step(page)
         expect(page.locator("#photos-bulk")).to_have_count(1)
@@ -180,7 +190,7 @@ def main():
         assert response.ok, response.text()
         result = response.json()
         assert_result(result, 3)
-        page.wait_for_url("**/#report")
+        page.wait_for_url("**#report")
         expect(page.locator(".metric")).to_have_count(4)
         for index, metric in enumerate(result["metrics"]):
             label = metric["label"] if metric["settings_verified"] else f"참고번호 {metric['class_index']}"
@@ -204,6 +214,16 @@ def main():
         page.locator('[data-nav="history"]').click()
         expect(page.locator("[data-record]")).to_have_count(1)
         expect(page.locator(".chart circle")).to_have_count(4)
+        day = page.locator('[data-date]').first
+        selected_date = day.get_attribute('data-date')
+        day.focus()
+        page.keyboard.press('Enter')
+        expect(page.locator(f'[data-date="{selected_date}"]')).to_be_focused()
+        open_details_for(page, '.chart')
+        page.locator('[data-range="week"]').focus()
+        page.keyboard.press('Enter')
+        expect(page.locator('[data-range="week"]')).to_be_focused()
+        expect(page.locator('[data-range="week"]')).to_have_attribute('aria-pressed', 'true')
         page.locator("[data-record]").click()
         expect(page.locator(".metric")).to_have_count(4)
         expect(page.locator(".result-thumbnail")).to_have_count(0)
@@ -239,7 +259,7 @@ def main():
         assert pending.value.ok, pending.value.text()
         one = pending.value.json()
         assert_result(one, 1)
-        page.wait_for_url("**/#report")
+        page.wait_for_url("**#report")
         expect(page.locator(".metric")).to_have_count(4)
 
         # API failures preserve the selected photo for retry and never fabricate a report.
@@ -266,7 +286,7 @@ def main():
     print(json.dumps({
         "result": "PASS", "models": 4, "three_photo_ms": result["elapsed_ms"],
         "one_photo_ms": one["elapsed_ms"], "configuration_id": result["configuration_id"],
-        "checks": "guided steps, bulk/drop/remove, preserved photos, no premature upload, real inference, "
+        "checks": "guided steps, keyboard navigation, bulk/drop/remove, preserved photos, no premature upload, real inference, "
                   "mean aggregation, storage/reload, history, 320/390/768 layouts, API failure/retry, file entry",
     }, ensure_ascii=False))
 

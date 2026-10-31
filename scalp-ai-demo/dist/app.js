@@ -208,6 +208,7 @@ function render(focus = false) {
   const focused = document.activeElement;
   const focusId = focused?.id;
   const focusAction = focused?.dataset?.action;
+  const focusData = ['date', 'range', 'record'].map(key => [key, focused?.dataset?.[key]]).find(([, value]) => value !== undefined);
   const scrollY = window.scrollY;
   $$('[data-nav]').forEach(link => { const active = link.dataset.nav === page || (page === 'report' && link.dataset.nav === 'analysis'); link.classList.toggle('active', active); if (active) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current'); });
   $('#main').innerHTML = ({ analysis, report, history, care, about })[page]();
@@ -217,7 +218,9 @@ function render(focus = false) {
   $('#server-dot').dataset.status = state.health.status;
   if (focus) focusContent(page === 'analysis' ? '[data-step-title]' : 'h1');
   else {
-    const target = (focusId && document.getElementById(focusId)) || (focusAction && $$('[data-action]').find(el => el.dataset.action === focusAction));
+    const target = (focusId && document.getElementById(focusId))
+      || (focusAction && $$('[data-action]').find(el => el.dataset.action === focusAction))
+      || (focusData && $$(`[data-${focusData[0]}]`).find(el => el.dataset[focusData[0]] === focusData[1]));
     if (target && !target.disabled) target.focus({ preventScroll: true });
     window.scrollTo({ top: scrollY, behavior: 'instant' });
   }
@@ -320,6 +323,12 @@ document.addEventListener('change', event => {
   if (event.target.matches('[data-check]')) { const i = Number(event.target.dataset.check); if (event.target.checked) state.checks.add(i); else state.checks.delete(i); $('.check-count').textContent = `${state.checks.size} / 3 확인`; }
 });
 document.addEventListener('click', event => {
+  if (event.target.closest('.skip-link')) {
+    event.preventDefault();
+    $('#main').focus({ preventScroll: true });
+    $('#main').scrollIntoView({ block: 'start', behavior: 'instant' });
+    return;
+  }
   const remove = event.target.closest('[data-remove]');
   if (remove && !state.working && !state.reading.size) { const index = Number(remove.dataset.remove); releasePhoto(index); invalidateResult(); state.error = ''; state.uploadNote = ''; render(); requestAnimationFrame(() => $(`#photo-${index}`)?.focus({ preventScroll: true })); return; }
   const step = event.target.closest('[data-step]'); if (step && !step.disabled) { setStep(Number(step.dataset.step)); return; }
