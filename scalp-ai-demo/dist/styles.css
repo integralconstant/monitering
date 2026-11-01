@@ -201,6 +201,17 @@ main { width: 100%; max-width: 1224px; margin: 0 auto; padding: 48px 32px 80px; 
 .metric-icon { width: 35px; height: 35px; background: #f3f2eb; border-radius: 11px; display: grid; place-items: center; flex: 0 0 35px; color: #6c8278; }
 .metric-icon .icon { width: 19px; height: 19px; }
 .metric-value { font-size: 23px; font-weight: 700; margin: 20px 0 6px; letter-spacing: -.055em; line-height: 1.45; overflow-wrap: anywhere; }
+.metric.grade-0 .metric-value, .grade-text.grade-0 { color: #36715a; }
+.metric.grade-1 .metric-value, .grade-text.grade-1 { color: #9b691e; }
+.metric.grade-2 .metric-value, .grade-text.grade-2 { color: #ad4b3d; }
+.grade-scale { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 6px; margin: 18px 0; }
+.grade-scale span { min-width: 0; color: var(--muted); text-align: center; font-size: 12px; }
+.grade-scale i { display: block; height: 5px; margin-bottom: 6px; border-radius: 5px; background: #e8e8e1; }
+.grade-scale .is-active { color: var(--ink); font-weight: 700; }
+.grade-scale .is-active i { background: currentColor; }
+.grade-0 .grade-scale .is-active { color: #36715a; }
+.grade-1 .grade-scale .is-active { color: #9b691e; }
+.grade-2 .grade-scale .is-active { color: #ad4b3d; }
 .metric-description { font-size: 13px; color: var(--muted); margin: 0; line-height: 1.7; }
 .details-panel { margin-top: 24px; border: 1px solid var(--line); border-radius: 18px; background: #fff; padding: 0 25px; }
 .details-panel>summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; list-style: none; min-height: 66px; font-size: 15px; font-weight: 700; }

@@ -30,6 +30,15 @@ const METRICS = [
   { id: 'hair_loss', name: '탈모 여부', icon: 'hair', color: '#7772a2', description: '탈모 관련 특징을 살펴봐요.' },
   { id: 'erythema', name: '모낭사이홍반', icon: 'redness', color: '#b16c78', description: '모낭 사이 두피의 붉은 기를 살펴봐요.' }
 ];
+const SEVERITY_LABELS = ['정상', '경증', '중증'];
+const FLAKES_GRADE_LABELS = ['정상', '경중등도', '중증'];
+const FLAKES_PREPROCESSING_VERSION = 'flakes-384-square-v1';
+const CLASS_GRADE_MAP = {
+  flakes: [0, 1, 1, 2],
+  sebum: [0, 1, 2],
+  hair_loss: [0, 1, 2],
+  erythema: [0, 1, 2]
+};
 const STORAGE_KEY = 'scalp-ai-model-records-v2';
 const CAN_FETCH = ['http:', 'https:'].includes(location.protocol);
 function today() { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()); }
@@ -42,8 +51,43 @@ const state = {
   health: { status: 'loading', message: '', models: [] }
 };
 function escapeHTML(value) { return String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char])); }
-function percent(value) { return `${(value * 100).toFixed(1)}%`; }
-function metricLabel(metric) { return metric.settings_verified === true ? metric.label : `참고번호 ${metric.class_index}`; }
+function validProbabilities(values, length) {
+  return Array.isArray(values) && values.length === length
+    && values.every(value => Number.isFinite(value) && value >= 0 && value <= 1)
+    && Math.abs(values.reduce((sum, value) => sum + value, 0) - 1) < 0.01;
+}
+function gradeLabels(metric) { return metric?.id === 'flakes' ? FLAKES_GRADE_LABELS : SEVERITY_LABELS; }
+function gradeProbabilities(metric) {
+  const mapping = CLASS_GRADE_MAP[metric?.id];
+  if (!mapping || !validProbabilities(metric.probabilities, mapping.length)) return null;
+  const probabilities = [0, 0, 0];
+  metric.probabilities.forEach((value, index) => { probabilities[mapping[index]] += value; });
+  return probabilities;
+}
+function metricGrade(metric) {
+  // Merge before choosing the grade, including when reading older stored outputs.
+  const probabilities = gradeProbabilities(metric);
+  if (!probabilities) return null;
+  return probabilities.reduce((best, value, index) => value > probabilities[best] ? index : best, 0);
+}
+function metricLabel(metric) { const grade = metricGrade(metric); return grade === null ? '확인 필요' : gradeLabels(metric)[grade]; }
+function validGradeMetadata(metric) {
+  const fields = ['grade_probabilities', 'grade_labels', 'grade_confidence', 'grading_method', 'grade_indices', 'preprocessing_version'];
+  if (!fields.some(field => field in metric)) return true; // Original records retain their raw values.
+  const probabilities = gradeProbabilities(metric), labels = gradeLabels(metric), grade = metricGrade(metric);
+  if (!probabilities || !validProbabilities(metric.grade_probabilities, 3)
+    || !Array.isArray(metric.grade_labels) || metric.grade_labels.length !== 3
+    || !metric.grade_labels.every((label, index) => label === labels[index])
+    || !metric.grade_probabilities.every((value, index) => Math.abs(value - probabilities[index]) < 0.00001)
+    || metric.grade_index !== grade || metric.label !== labels[grade]
+    || !Number.isFinite(metric.grade_confidence) || Math.abs(metric.grade_confidence - probabilities[grade]) >= 0.00001
+    || metric.grading_method !== (metric.id === 'flakes' ? 'probability_merge' : 'argmax')) return false;
+  if ('grade_indices' in metric && (!Array.isArray(metric.grade_indices)
+    || metric.grade_indices.length !== CLASS_GRADE_MAP[metric.id].length
+    || !metric.grade_indices.every((value, index) => value === CLASS_GRADE_MAP[metric.id][index]))) return false;
+  return metric.id !== 'flakes' || (metric.preprocessing_version === FLAKES_PREPROCESSING_VERSION
+    && Array.isArray(metric.excluded_classes) && metric.excluded_classes.length === 0);
+}
 function validMetric(metric, index) {
   return metric && metric.id === METRICS[index].id && typeof metric.label === 'string' && metric.label.length <= 200
     && typeof metric.settings_verified === 'boolean' && Number.isInteger(metric.class_index)
@@ -53,9 +97,13 @@ function validMetric(metric, index) {
     && Math.abs(metric.probabilities.reduce((sum, p) => sum + p, 0) - 1) < 0.01
     && Number.isFinite(metric.confidence) && metric.confidence >= 0 && metric.confidence <= 1
     && Math.abs(metric.confidence - metric.probabilities[metric.class_index]) < 0.001
-    && metric.confidence >= Math.max(...metric.probabilities) - 0.001
+    && (!('excluded_classes' in metric) || (Array.isArray(metric.excluded_classes)
+      && metric.excluded_classes.every(value => Number.isInteger(value) && value >= 0 && value < metric.probabilities.length)
+      && !metric.excluded_classes.includes(metric.class_index)))
+    && metric.confidence >= Math.max(...metric.probabilities.filter((_, classIndex) => !metric.excluded_classes?.includes(classIndex))) - 0.001
     && Array.isArray(metric.class_labels) && metric.class_labels.length === metric.probabilities.length
-    && metric.class_labels.every(label => typeof label === 'string' && label.length <= 200);
+    && metric.class_labels.every(label => typeof label === 'string' && label.length <= 200)
+    && validGradeMetadata(metric);
 }
 function validMetrics(metrics) { return Array.isArray(metrics) && metrics.length === 4 && metrics.every(validMetric); }
 function validDate(date) {
@@ -81,7 +129,16 @@ function readRecords() {
 }
 function storedMetric(metric) {
   return { id: metric.id, label: metric.label, class_index: metric.class_index, confidence: metric.confidence,
-    probabilities: [...metric.probabilities], class_labels: [...metric.class_labels], settings_verified: metric.settings_verified };
+    probabilities: [...metric.probabilities], class_labels: [...metric.class_labels], settings_verified: metric.settings_verified,
+    ...(Array.isArray(metric.excluded_classes) ? { excluded_classes: [...metric.excluded_classes] } : {}),
+    ...(Number.isInteger(metric.grade_index) ? { grade_index: metric.grade_index } : {}),
+    ...(typeof metric.labels_confirmed === 'boolean' ? { labels_confirmed: metric.labels_confirmed } : {}),
+    ...(Array.isArray(metric.grade_probabilities) ? { grade_probabilities: [...metric.grade_probabilities] } : {}),
+    ...(Array.isArray(metric.grade_labels) ? { grade_labels: [...metric.grade_labels] } : {}),
+    ...(Array.isArray(metric.grade_indices) ? { grade_indices: [...metric.grade_indices] } : {}),
+    ...(Number.isFinite(metric.grade_confidence) ? { grade_confidence: metric.grade_confidence } : {}),
+    ...(typeof metric.grading_method === 'string' ? { grading_method: metric.grading_method } : {}),
+    ...(typeof metric.preprocessing_version === 'string' ? { preprocessing_version: metric.preprocessing_version } : {}) };
 }
 function storedRecord(result) {
   return { id: result.id, date: result.date, source: 'model', photo_count: result.photo_count,
@@ -108,8 +165,8 @@ function serviceStatus() {
   return `<div class="status-panel ${state.health.status}" role="status"><span class="status-indicator" aria-hidden="true"></span><div><strong>${state.health.status === 'loading' ? '분석할 준비를 하고 있어요' : '분석 서비스에 연결하지 못했어요'}</strong><p>${state.health.status === 'loading' ? '사진은 먼저 골라 두셔도 좋아요. 준비가 끝나면 분석 버튼이 활성화돼요.' : '선택한 사진은 그대로 유지돼요. 잠시 후 다시 연결해 주세요.'}</p>${state.health.status === 'error' ? button('다시 연결하기', 'health', true, 'arrow') : ''}${state.health.status === 'error' ? '<details class="help-details"><summary>계속 연결되지 않나요?</summary><p>실행 중인 분석 창을 확인해 주세요. 이 PC에서는 프로젝트 폴더의 start.cmd로 다시 실행할 수 있어요.</p></details>' : ''}</div></div>`;
 }
 function expectationNote() {
-  const verified = state.health.settings_verified === true;
-  return verified ? '' : '<div class="guide-callout"><strong>시작하기 전에 알아두세요</strong><p>지금은 사진을 분류한 참고번호를 제공해요. 정상·중증이나 탈모 유무 판정은 아직 제공하지 않아요.</p></div>';
+  const verified = state.health.models?.find(model => model.id === 'flakes')?.settings_verified === true;
+  return `<div class="guide-callout"><strong>결과는 이렇게 확인해 주세요</strong><p>각질은 정상·경중등도·중증으로 표시해요. 경중등도는 경증과 중등도를 합친 등급이에요. 다른 항목은 정상·경증·중증으로 확인할 수 있어요.</p>${state.health.settings_verified === true ? '' : `<p class="metric-note">${verified ? '각질은 학습 코드의 처리 설정을 적용했어요. 다른 항목의 이미지 처리 설정은 확인 중이며, 결과는 관찰 참고용이에요.' : '분석 설정을 확인하고 있어요. 결과는 두피를 관찰하는 참고 자료로 봐 주세요.'}</p>`}</div>`;
 }
 function helper() {
   return `<aside class="helper-card"><p class="section-kicker">한 장으로 시작해도 괜찮아요</p><h2 class="helper-title">어떤 부분을 살펴보나요?</h2><p>사진 한 장에서 네 가지 항목을 각각 살펴봐요.</p><div class="metric-preview">${METRICS.map(m => `<div class="metric-preview-item"><span class="metric-preview-icon">${icon(m.icon)}</span><div><strong>${m.name}</strong><p>${m.description}</p></div></div>`).join('')}</div><div class="helper-list"><p>${icon('check')} 사진 1장부터, 최대 3장까지</p><p>${icon('lock')} 사진은 분석에만 사용해요</p></div><a class="text-button" href="#care">촬영 방법 자세히 보기 ${icon('arrow')}</a></aside>`;
@@ -139,19 +196,29 @@ function analysis() {
 function metricCards(result) {
   return METRICS.map((definition, index) => {
     const metric = result.metrics[index];
-    return `<article class="metric"><div class="metric-header"><span class="metric-icon">${icon(definition.icon)}</span><h2>${definition.name}</h2></div><div class="metric-value">${escapeHTML(metricLabel(metric))}</div><p class="metric-description">${definition.description}</p></article>`;
+    const grade = metricGrade(metric);
+    return `<article class="metric ${grade === null ? 'grade-unknown' : `grade-${grade}`}" data-metric="${definition.id}"><div class="metric-header"><span class="metric-icon">${icon(definition.icon)}</span><h2>${definition.name}</h2></div><div class="metric-value">${escapeHTML(metricLabel(metric))}</div><div class="grade-scale" aria-label="${definition.name} ${escapeHTML(metricLabel(metric))}">${gradeLabels(metric).map((label, i) => `<span class="${grade === i ? 'is-active' : ''}" ${grade === i ? 'aria-current="true"' : ''}><i aria-hidden="true"></i>${label}</span>`).join('')}</div><p class="metric-description">${definition.description}</p></article>`;
   }).join('');
 }
 function resultExplanation(result) {
-  return `<section class="result-explanation ${result.settings_verified ? '' : 'inline-notice warning'}"><div>${icon(result.settings_verified ? 'report' : 'leaf')}</div><div><h2>${result.settings_verified ? '이렇게 읽어 주세요' : '참고번호, 어떻게 읽으면 되나요?'}</h2><p>${result.settings_verified ? '사진에 나타난 특징을 분석한 결과예요. 의료 진단을 대신하지는 않아요.' : 'AI가 사진을 분류한 번호예요. 숫자가 높다고 증상이 심한 것은 아니에요. 아직 분류별 의미를 확인하는 중이라 정상·중증이나 탈모 유무를 판단할 수는 없어요.'}</p></div></section>`;
+  const verified = result.metrics.find(metric => metric.id === 'flakes')?.settings_verified === true;
+  return `<section class="result-explanation"><div>${icon('leaf')}</div><div><h2>네 가지 항목을 등급으로 확인해요</h2><p>각질의 중간 등급인 경중등도는 경증과 중등도를 함께 나타내요. 다른 항목의 중간 등급은 경증이에요. 결과는 관찰 참고용이며 의료 진단을 대신하지 않아요.</p>${result.settings_verified ? '' : `<p class="metric-note">${verified ? '각질은 학습 코드 기준의 이미지 처리 설정으로 분석했어요. 다른 항목의 처리 설정은 확인 중이에요.' : '이 결과에는 아직 처리 설정을 확인하지 못한 항목이 있어요.'} 촬영 조건에 따라 결과가 달라질 수 있어요.</p>`}</div></section>`;
+}
+function usesLegacyFlakesPreprocessing(result) {
+  const flakes = result?.metrics?.find(metric => metric.id === 'flakes');
+  return Boolean(flakes && flakes.preprocessing_version !== FLAKES_PREPROCESSING_VERSION);
+}
+function legacyAnalysisNotice(result, compact = false) {
+  if (!usesLegacyFlakesPreprocessing(result)) return '';
+  return `<div class="inline-notice warning legacy-analysis-note" data-legacy-analysis><strong>이전 분석 설정의 기록</strong><p>${compact ? '각질 등급은 학습 코드 기준으로 다시 표시했어요. 현재 이미지 처리 설정을 적용하려면 원본 사진으로 다시 분석해 주세요.' : '각질 등급은 저장된 분석값을 학습 코드의 등급 규칙으로 다시 계산해 표시했어요. 사진을 다시 분석한 결과는 아니에요. 현재 이미지 처리 설정을 적용하려면 원본 사진으로 다시 분석해 주세요.'}</p></div>`;
 }
 function analysisDetails(result) {
-  return `<details class="details-panel" data-details="analysis"><summary><span>분석 수치 자세히 보기</span><span>항목별 점수와 사진별 결과</span></summary><div class="details-content"><p class="metric-note">점수는 AI가 각 분류에 부여한 값이에요. 실제 질환 확률이나 분석 정확도를 뜻하지 않아요.</p><div class="detail-metrics">${METRICS.map((definition, i) => { const m = result.metrics[i]; return `<section><h3>${definition.name}</h3><div class="model-score">선택된 분류의 모델 점수 <b>${percent(m.confidence)}</b></div><div class="probability-list">${m.probabilities.map((p, j) => `<div class="probability-row"><span>${escapeHTML(m.settings_verified ? m.class_labels[j] : `참고번호 ${j}`)}</span><div class="probability-track"><i style="width:${p * 100}%"></i></div><span>${percent(p)}</span></div>`).join('')}</div></section>`; }).join('')}</div><section class="photo-results"><h3>사진별 결과</h3><div class="table-scroll" tabindex="0" role="region" aria-label="사진별 분석 결과 표"><table><thead><tr><th scope="col">사진</th>${METRICS.map(m => `<th scope="col">${m.name}</th>`).join('')}</tr></thead><tbody>${result.per_photo.map((photo, index) => `<tr><th scope="row">${state.resultPhotos[index] ? `<img class="result-thumbnail" src="${state.resultPhotos[index]}" alt="분석한 사진 ${index + 1}">` : ''}<span>사진 ${index + 1}</span></th>${photo.metrics.map(m => `<td><strong>${escapeHTML(metricLabel(m))}</strong><small>${percent(m.confidence)}</small></td>`).join('')}</tr>`).join('')}</tbody></table></div><p class="metric-note">여러 장을 분석했다면 각 분류의 점수를 평균한 뒤 가장 높은 분류를 선택해요.</p></section>${result.warnings.length ? `<details class="help-details"><summary>현재 분석 설정 안내</summary>${result.warnings.map(w => `<p>${escapeHTML(w)}</p>`).join('')}</details>` : ''}</div></details>`;
+  return `<details class="details-panel" data-details="analysis"><summary><span>사진별 등급 자세히 보기</span><span>사진마다 어떤 결과가 나왔는지 확인해요</span></summary><div class="details-content"><section class="photo-results"><h3>사진별 분석 등급</h3><div class="table-scroll" tabindex="0" role="region" aria-label="사진별 분석 등급 표"><table><thead><tr><th scope="col">사진</th>${METRICS.map(m => `<th scope="col">${m.name}</th>`).join('')}</tr></thead><tbody>${result.per_photo.map((photo, index) => `<tr><th scope="row">${state.resultPhotos[index] ? `<img class="result-thumbnail" src="${state.resultPhotos[index]}" alt="분석한 사진 ${index + 1}">` : ''}<span>사진 ${index + 1}</span></th>${photo.metrics.map(m => `<td><strong class="grade-text grade-${metricGrade(m) ?? 'unknown'}">${escapeHTML(metricLabel(m))}</strong></td>`).join('')}</tr>`).join('')}</tbody></table></div><p class="metric-note">각질은 경증과 중등도의 분석값을 먼저 합쳐 경중등도 등급을 선택해요. 여러 장이면 사진별 분석값을 평균한 결과로 최종 등급을 정해요.</p></section></div></details>`;
 }
 function report() {
   const result = state.result;
   if (!result) return `${intro('분석 결과', '아직 분석한 사진이 없어요.', '사진 한 장을 준비하면 네 가지 항목을 살펴볼 수 있어요.')}${emptyState('첫 기록을 시작해 볼까요?', '사진 준비부터 하나씩 안내해 드릴게요. 이전 결과는 내 기록에서 다시 볼 수 있어요.')}`;
-  return `${intro(state.savedId ? '저장한 두피 기록' : '사진 분석 완료', '오늘의 두피 기록이 준비됐어요.', '네 가지 항목을 살펴보고, 결과를 저장해 다음 기록과 함께 보세요.')}<section class="report-overview"><div class="result-meta">${icon('calendar')} ${shortDate(result.date)}<span>사진 ${result.photo_count}장 분석</span></div><span class="result-tag">${state.savedId ? '저장된 기록' : '새로운 기록'}</span></section>${resultExplanation(result)}<section class="metrics" aria-label="네 가지 분석 결과">${metricCards(result)}</section><section class="surface next-step"><div><span class="section-kicker">이 결과를 다음에도 보고 싶다면</span><h2>${state.savedId ? '내 기록에 잘 보관했어요' : '오늘의 결과를 기록해 두세요'}</h2><p>${state.savedId ? '같은 브라우저의 내 기록에서 언제든 다시 볼 수 있어요.' : '이 브라우저에 결과만 저장해요. 사진은 저장하지 않아요.'}</p></div>${state.savedId ? '<a class="button" href="#history">내 기록 보러 가기' + icon('arrow') + '</a>' : button('오늘의 결과 저장하기', 'save', false, 'save')}</section>${analysisDetails(result)}<div class="bottom-actions">${button('결과 인쇄하기', 'print', true, 'report')}${button('다른 사진 분석하기', 'new', true, 'photo')}</div>`;
+  return `${intro(state.savedId ? '저장한 두피 기록' : '사진 분석 완료', '오늘의 두피 기록이 준비됐어요.', '네 가지 항목을 살펴보고, 결과를 저장해 다음 기록과 함께 보세요.')}<section class="report-overview"><div class="result-meta">${icon('calendar')} ${shortDate(result.date)}<span>사진 ${result.photo_count}장 분석</span></div><span class="result-tag">${state.savedId ? '저장된 기록' : '새로운 기록'}</span></section>${resultExplanation(result)}${legacyAnalysisNotice(result)}<section class="metrics" aria-label="네 가지 분석 결과">${metricCards(result)}</section><section class="surface next-step"><div><span class="section-kicker">이 결과를 다음에도 보고 싶다면</span><h2>${state.savedId ? '내 기록에 잘 보관했어요' : '오늘의 결과를 기록해 두세요'}</h2><p>${state.savedId ? '같은 브라우저의 내 기록에서 언제든 다시 볼 수 있어요.' : '이 브라우저에 결과만 저장해요. 사진은 저장하지 않아요.'}</p></div>${state.savedId ? '<a class="button" href="#history">내 기록 보러 가기' + icon('arrow') + '</a>' : button('오늘의 결과 저장하기', 'save', false, 'save')}</section>${analysisDetails(result)}<div class="bottom-actions">${button('결과 인쇄하기', 'print', true, 'report')}${button('다른 사진 분석하기', 'new', true, 'photo')}</div>`;
 }
 function graphRecords(range) {
   const records = readRecords();
@@ -169,9 +236,22 @@ function lineChart(range) {
   const start = Date.parse(`${days[0]}T00:00:00Z`), span = Date.parse(`${days.at(-1)}T00:00:00Z`) - start;
   const xFor = date => span ? 65 + (Date.parse(`${date}T00:00:00Z`) - start) / span * 415 : 270;
   const points = records.map(record => ({ x: xFor(record.date), record }));
-  const lines = METRICS.map((m, i) => `<polyline points="${points.map(p => `${p.x},${140 - p.record.metrics[i].confidence * 110}`).join(' ')}" stroke="${m.color}" stroke-width="2" fill="none"/>${points.map(p => `<circle cx="${p.x}" cy="${140 - p.record.metrics[i].confidence * 110}" r="4" fill="white" stroke="${m.color}" stroke-width="2"><title>${p.record.date} ${m.name} ${escapeHTML(metricLabel(p.record.metrics[i]))} ${percent(p.record.metrics[i].confidence)}</title></circle>`).join('')}`).join('');
+  const lines = METRICS.map((m, i) => {
+    const segments = [];
+    let segment = [];
+    const circles = [];
+    points.forEach(p => {
+      const grade = metricGrade(p.record.metrics[i]);
+      if (grade === null) { if (segment.length) segments.push(segment); segment = []; return; }
+      const y = 140 - grade * 55;
+      segment.push(`${p.x},${y}`);
+      circles.push(`<circle cx="${p.x}" cy="${y}" r="4" fill="white" stroke="${m.color}" stroke-width="2"><title>${p.record.date} ${m.name} ${escapeHTML(metricLabel(p.record.metrics[i]))}</title></circle>`);
+    });
+    if (segment.length) segments.push(segment);
+    return segments.filter(values => values.length > 1).map(values => `<polyline points="${values.join(' ')}" stroke="${m.color}" stroke-width="2" fill="none"/>`).join('') + circles.join('');
+  }).join('');
   const labels = days.filter((_, i) => !i || i === days.length - 1 || i % Math.ceil(days.length / 5) === 0);
-  return `<svg class="chart" viewBox="0 0 520 180" role="img" aria-label="기록별 모델 점수 그래프. 점수는 증상의 정도를 뜻하지 않습니다."><path d="M56 30H495M56 85H495M56 140H495" stroke="#dddeda" stroke-dasharray="3 4" fill="none"/><text x="8" y="34">100%</text><text x="17" y="89">50%</text><text x="23" y="144">0%</text>${lines}${labels.map(d => `<text x="${xFor(d)}" y="169" text-anchor="middle">${d.slice(5).replace('-', '.')}</text>`).join('')}</svg>`;
+  return `<svg class="chart" viewBox="0 0 520 180" role="img" aria-label="기록별 정상, 중간 등급, 중증 분석 등급 그래프"><path d="M64 30H495M64 85H495M64 140H495" stroke="#dddeda" stroke-dasharray="3 4" fill="none"/><text x="55" y="34" text-anchor="end">중증</text><text x="55" y="89" text-anchor="end">중간 등급</text><text x="55" y="144" text-anchor="end">정상</text>${lines}${labels.map(d => `<text x="${xFor(d)}" y="169" text-anchor="middle">${d.slice(5).replace('-', '.')}</text>`).join('')}</svg>`;
 }
 function calendar() {
   const first = new Date(state.year, state.month, 1).getDay(), days = new Date(state.year, state.month + 1, 0).getDate();
@@ -186,7 +266,7 @@ function history() {
   const selected = records.filter(r => r.date === state.selectedDate);
   const header = intro('차곡차곡 쌓이는 나의 기록', '다시 보고 싶은 순간을 모았어요.', '날짜를 선택하면 그날 저장한 결과를 다시 볼 수 있어요.');
   if (!records.length) return `${header}${emptyState('아직 저장한 기록이 없어요', '사진 분석을 마친 뒤 ‘오늘의 결과 저장하기’를 눌러 주세요. 이 브라우저에서 다시 볼 수 있어요.')}`;
-  return `${header}<div class="history-stats"><div class="stat-item"><span>저장한 기록</span><strong>${records.length}<small>회</small></strong></div><div class="stat-item"><span>살펴본 사진</span><strong>${records.reduce((sum, r) => sum + r.photo_count, 0)}<small>장</small></strong></div><div class="stat-item"><span>가장 최근 기록</span><strong>${records.at(-1).date.slice(5).replace('-', '.')}</strong></div></div><div class="history-layout"><section class="surface">${calendar()}</section><section class="surface history-list"><div class="surface-heading"><div><p class="section-kicker">선택한 날짜</p><h2>${shortDate(state.selectedDate)}</h2></div></div>${selected.map(r => `<article class="history-record"><div class="record-date"><strong>두피 사진 분석</strong><span>사진 ${r.photo_count}장</span></div><div class="record-metrics">${r.metrics.map((m, i) => `<span>${METRICS[i].name}<strong>${escapeHTML(metricLabel(m))}</strong></span>`).join('')}</div><div class="record-actions"><button class="button secondary" data-record="${escapeHTML(r.id)}">결과 다시 보기${icon('arrow')}</button></div></article>`).join('') || '<div class="empty-state"><h3>이날은 저장한 기록이 없어요</h3><p>달력에서 점이 표시된 날짜를 선택해 주세요.</p></div>'}</section></div><details class="details-panel" data-details="history-chart"><summary><span>분석 수치의 변화 살펴보기</span><span>저장한 결과의 모델 점수</span></summary><div class="details-content"><p class="chart-footnote">같은 분석 설정으로 저장한 기록만 비교해요. 이 점수의 변화는 두피 상태의 호전·악화를 뜻하지 않아요.</p><div class="tabs" aria-label="그래프 기간"><button data-range="week" class="${state.range === 'week' ? 'selected' : ''}" aria-pressed="${state.range === 'week'}">최근 1주</button><button data-range="month" class="${state.range === 'month' ? 'selected' : ''}" aria-pressed="${state.range === 'month'}">선택한 달</button></div>${legend()}${lineChart(state.range)}</div></details><div class="bottom-actions"><p class="save-note">이 브라우저에 결과만 보관해요. 사진은 저장하지 않아요.</p><button class="text-button" data-action="clear-records">저장한 기록 모두 삭제</button></div>`;
+  return `${header}<div class="history-stats"><div class="stat-item"><span>저장한 기록</span><strong>${records.length}<small>회</small></strong></div><div class="stat-item"><span>살펴본 사진</span><strong>${records.reduce((sum, r) => sum + r.photo_count, 0)}<small>장</small></strong></div><div class="stat-item"><span>가장 최근 기록</span><strong>${records.at(-1).date.slice(5).replace('-', '.')}</strong></div></div><div class="history-layout"><section class="surface">${calendar()}</section><section class="surface history-list"><div class="surface-heading"><div><p class="section-kicker">선택한 날짜</p><h2>${shortDate(state.selectedDate)}</h2></div></div>${selected.map(r => `<article class="history-record"><div class="record-date"><strong>두피 사진 분석</strong><span>사진 ${r.photo_count}장</span></div>${legacyAnalysisNotice(r, true)}<div class="record-metrics">${r.metrics.map((m, i) => `<span>${METRICS[i].name}<strong>${escapeHTML(metricLabel(m))}</strong></span>`).join('')}</div><div class="record-actions"><button class="button secondary" data-record="${escapeHTML(r.id)}">결과 다시 보기${icon('arrow')}</button></div></article>`).join('') || '<div class="empty-state"><h3>이날은 저장한 기록이 없어요</h3><p>달력에서 점이 표시된 날짜를 선택해 주세요.</p></div>'}</section></div><details class="details-panel" data-details="history-chart"><summary><span>분석 등급의 변화 살펴보기</span><span>저장한 결과를 세 단계로 비교해요</span></summary><div class="details-content"><p class="chart-footnote">같은 분석 설정으로 저장한 기록의 등급을 비교해요. 각질의 중간 등급은 경중등도(경증+중등도), 다른 항목의 중간 등급은 경증이에요. 촬영 조건이 다르면 결과가 달라질 수 있으므로, 그래프만으로 호전·악화를 단정하지 마세요.</p><div class="tabs" aria-label="그래프 기간"><button data-range="week" class="${state.range === 'week' ? 'selected' : ''}" aria-pressed="${state.range === 'week'}">최근 1주</button><button data-range="month" class="${state.range === 'month' ? 'selected' : ''}" aria-pressed="${state.range === 'month'}">선택한 달</button></div>${legend()}${lineChart(state.range)}</div></details><div class="bottom-actions"><p class="save-note">이 브라우저에 결과만 보관해요. 사진은 저장하지 않아요.</p><button class="text-button" data-action="clear-records">저장한 기록 모두 삭제</button></div>`;
 }
 function care() {
   const tips = [
@@ -197,7 +277,7 @@ function care() {
   return `${intro('사진 한 장을 위한 작은 도움', '이렇게 찍으면 준비 끝이에요.', '어렵게 생각하지 마세요. 두피가 선명하게 보이는 사진이면 좋아요.')}<div class="guide-cards">${tips.map((t, i) => `<article class="surface guide-card"><div class="guide-example">${icon(t[3])}<span class="guide-number">0${i + 1}</span></div><p class="section-kicker">${t[0]}</p><h2>${t[1]}</h2><p>${t[2]}</p></article>`).join('')}</div><section class="surface care-checklist"><div class="surface-heading"><div><p class="section-kicker">촬영 전 마지막 확인</p><h2>하나씩 확인해 볼까요?</h2></div><span class="check-count">${state.checks.size} / 3 확인</span></div>${['두피가 잘 보이도록 모발을 나눴어요.', '흔들림과 빛 반사 없이 선명하게 보여요.', '여러 장이면 같은 부위를 촬영했어요.'].map((text, i) => `<label class="task"><input type="checkbox" data-check="${i}" ${state.checks.has(i) ? 'checked' : ''}><span>${text}</span></label>`).join('')}<div class="flow-actions"><p class="save-note">확인 표시는 이 페이지를 사용하는 동안 유지돼요.</p>${button('준비한 사진 고르기', 'start')}</div></section>`;
 }
 function about() {
-  return `${intro('서비스 소개', '사진에서 시작하는 두피 기록.', '딥러닝 기반 ai 두피 관리 서비스')}<section class="surface about-hero"><h2>내 두피를 살펴보는 시간을<br>조금 더 쉽게 만들고 싶었어요.</h2><p>사진 한 장으로 각질, 피지과다, 탈모 여부, 모낭사이홍반의 네 가지 항목을 살펴보고 결과를 기록하는 서비스예요.</p><p>현재는 사진의 특징을 분류한 참고번호를 제공해요. 분류별 의미를 확인한 뒤 더 이해하기 쉬운 결과를 제공할 예정이에요.</p><div class="about-credits"><div><span>만든 곳</span><strong>대림대학교 · 지공모</strong></div><div><span>팀원</span><strong>연일 · 이승철 · 김진형</strong></div><div><span>지도교수</span><strong>김영실 · 박상윤</strong></div></div></section>`;
+  return `${intro('서비스 소개', '사진에서 시작하는 두피 기록.', '딥러닝 기반 ai 두피 관리 서비스')}<section class="surface about-hero"><h2>내 두피를 살펴보는 시간을<br>조금 더 쉽게 만들고 싶었어요.</h2><p>사진 한 장으로 각질, 피지과다, 탈모 여부, 모낭사이홍반의 네 가지 항목을 살펴보고 결과를 기록하는 서비스예요.</p><p>각질은 학습 코드에 맞춰 정상·경중등도·중증으로 정리해요. 경중등도는 경증과 중등도를 합친 등급이에요. 다른 항목은 정상·경증·중증으로 표시하며, 이미지 처리 설정을 확인 중이에요. 결과는 관찰 참고용으로 제공해요.</p><div class="about-credits"><div><span>만든 곳</span><strong>대림대학교 · 지공모</strong></div><div><span>팀원</span><strong>연일 · 이승철 · 김진형</strong></div><div><span>지도교수</span><strong>김영실 · 박상윤</strong></div></div></section>`;
 }
 function currentPage() { const route = location.hash.slice(1) || 'analysis'; return ['analysis', 'report', 'history', 'care', 'about'].includes(route) ? route : 'analysis'; }
 function focusContent(selector = 'h1') { requestAnimationFrame(() => $('#main').querySelector(selector)?.focus({ preventScroll: true })); }

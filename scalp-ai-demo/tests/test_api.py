@@ -7,15 +7,22 @@ Real checkpoint loading and browser integration are checked separately.
 from __future__ import annotations
 
 import io
+import json
+import tempfile
 import threading
 import unittest
+from copy import deepcopy
+from pathlib import Path
 from unittest.mock import patch
 
 import torch
 from flask import request
 from PIL import Image
 from torch import nn
+from torchvision import transforms
+from torchvision.transforms import InterpolationMode
 
+import inference
 import server
 from inference import AnalysisBusy, ModelService, ModelUnavailable, read_config
 
@@ -194,7 +201,7 @@ def simulated_service(photo_count=3):
     for config in service.configs:
         rows = [[0.8, 0.1, 0.1], [0.2, 0.7, 0.1], [0.2, 0.2, 0.6]]
         if config["num_classes"] == 4:
-            rows = [[0.7, 0.1, 0.1, 0.1], [0.2, 0.6, 0.1, 0.1], [0.2, 0.1, 0.6, 0.1]]
+            rows = [[0.7, 0.15, 0.1, 0.05], [0.2, 0.6, 0.1, 0.1], [0.2, 0.15, 0.55, 0.1]]
         service.models[config["id"]] = SequenceModel(rows[:photo_count])
         service.transforms[config["id"]] = lambda _: torch.zeros(3, 4, 4)
     return service
@@ -208,12 +215,18 @@ class AggregationTests(unittest.TestCase):
         self.assertEqual([m["id"] for m in result["metrics"]], [c["id"] for c in service.configs])
         self.assertEqual([p["index"] for p in result["per_photo"]], [0, 1, 2])
         for metric in result["metrics"]:
-            expected = [1.1 / 3, 0.8 / 3, 0.8 / 3, 0.1] if metric["id"] == "flakes" else [0.4, 1 / 3, 0.8 / 3]
+            expected = [1.1 / 3, 0.9 / 3, 0.75 / 3, 0.25 / 3] if metric["id"] == "flakes" else [0.4, 1 / 3, 0.8 / 3]
             torch.testing.assert_close(torch.tensor(metric["probabilities"]), torch.tensor(expected))
             self.assertEqual(metric["class_index"], 0)
+            self.assertEqual(metric["grade_index"], 1 if metric["id"] == "flakes" else 0)
+            self.assertEqual(metric["label"], "경중등도" if metric["id"] == "flakes" else "정상")
+            expected_grades = [1.1 / 3, 1.65 / 3, 0.25 / 3] if metric["id"] == "flakes" else expected
+            torch.testing.assert_close(torch.tensor(metric["grade_probabilities"]), torch.tensor(expected_grades))
+            self.assertTrue(metric["labels_confirmed"])
             self.assertAlmostEqual(sum(metric["probabilities"]), 1, places=6)
-        for photo, expected_index in zip(result["per_photo"], (0, 1, 2)):
-            self.assertEqual([m["class_index"] for m in photo["metrics"]], [expected_index] * 4)
+        for photo, expected_indices in zip(result["per_photo"], ([0, 0, 0, 0], [1, 1, 1, 1], [2, 2, 2, 2])):
+            self.assertEqual([m["class_index"] for m in photo["metrics"]], expected_indices)
+        self.assertEqual([p["metrics"][0]["grade_index"] for p in result["per_photo"]], [0, 1, 1])
         self.assertFalse(result["settings_verified"])
         self.assertTrue(result["warnings"])
         self.assertEqual(result["configuration_id"], "test-configuration")
@@ -222,11 +235,14 @@ class AggregationTests(unittest.TestCase):
         service = simulated_service(photo_count=1)
         for config in service.configs:
             config["labels"] = ["medical-label"] * config["num_classes"]
+            config["labels_confirmed"] = False
+            config["settings_verified"] = False
         result = service.analyze([object()])
         self.assertEqual(result["metrics"], result["per_photo"][0]["metrics"])
         for metric in result["metrics"]:
-            self.assertEqual(metric["label"], "클래스 0")
+            self.assertEqual(metric["label"], f"클래스 {metric['class_index']}")
             self.assertNotIn("medical-label", metric["class_labels"])
+            self.assertIsNone(metric["grade_index"])
 
     def test_busy_lock_prevents_parallel_inference(self):
         service = simulated_service(photo_count=1)
@@ -244,6 +260,144 @@ class AggregationTests(unittest.TestCase):
                     service.analyze([object()])
                 self.assertTrue(service._lock.acquire(blocking=False))
                 service._lock.release()
+
+
+class GradeMappingTests(unittest.TestCase):
+    def setUp(self):
+        self.service = simulated_service(photo_count=1)
+        self.configs = {config["id"]: config for config in self.service.configs}
+
+    def test_flakes_class_zero_is_restored_as_normal(self):
+        probabilities = [0.85, 0.03, 0.09, 0.03]
+        result = self.service._metric(self.configs["flakes"], probabilities)
+        self.assertEqual(result["class_index"], 0)
+        self.assertEqual(result["grade_index"], 0)
+        self.assertEqual(result["label"], "정상")
+        self.assertEqual(result["excluded_classes"], [])
+        self.assertEqual(result["confidence"], 0.85)
+        self.assertEqual(result["probabilities"], probabilities)
+        self.assertEqual(result["grade_probabilities"], [0.85, 0.12, 0.03])
+        self.assertAlmostEqual(sum(result["probabilities"]), 1)
+
+    def test_flakes_adds_mild_and_moderate_probabilities_before_argmax(self):
+        probabilities = [0.010, 0.307, 0.336, 0.347]
+        result = self.service._metric(self.configs["flakes"], probabilities)
+        self.assertEqual(result["class_index"], 3)
+        self.assertAlmostEqual(result["confidence"], 0.347)
+        self.assertEqual(result["grade_index"], 1)
+        self.assertEqual(result["label"], "경중등도")
+        torch.testing.assert_close(torch.tensor(result["grade_probabilities"]), torch.tensor([0.010, 0.643, 0.347]))
+        self.assertAlmostEqual(result["grade_confidence"], 0.643)
+        self.assertEqual(result["grading_method"], "probability_merge")
+
+    def test_each_flakes_final_grade_uses_the_training_merge_rule(self):
+        cases = [([0.7, 0.1, 0.1, 0.1], 0, "정상"),
+                 ([0.4, 0.3, 0.25, 0.05], 1, "경중등도"),
+                 ([0.1, 0.1, 0.1, 0.7], 2, "중증")]
+        for probabilities, grade, label in cases:
+            with self.subTest(grade=grade):
+                result = self.service._metric(self.configs["flakes"], probabilities)
+                self.assertEqual(result["class_index"], max(range(4), key=probabilities.__getitem__))
+                self.assertEqual(result["grade_index"], grade)
+                self.assertEqual(result["label"], label)
+                self.assertTrue(result["labels_confirmed"])
+                self.assertTrue(result["settings_verified"])
+                self.assertEqual(result["preprocessing_version"], "flakes-384-square-v1")
+
+    def test_other_models_select_the_highest_probability_instead_of_the_highest_class_number(self):
+        for model_id in ("sebum", "hair_loss", "erythema"):
+            for selected, label in enumerate(("정상", "경증", "중증")):
+                with self.subTest(model=model_id, selected=selected):
+                    probabilities = [0.1, 0.1, 0.1]
+                    probabilities[selected] = 0.8
+                    result = self.service._metric(self.configs[model_id], probabilities)
+                    self.assertEqual(result["class_index"], selected)
+                    self.assertEqual(result["grade_index"], selected)
+                    self.assertEqual(result["label"], label)
+                    self.assertEqual(result["excluded_classes"], [])
+                    self.assertEqual(result["grade_probabilities"], probabilities)
+                    self.assertEqual(result["grading_method"], "argmax")
+
+    def test_only_flakes_preprocessing_is_confirmed_by_the_provided_training_code(self):
+        result = self.service.analyze([object()])
+        self.assertFalse(result["settings_verified"])
+        self.assertTrue(result["warnings"])
+        for metric in result["metrics"]:
+            self.assertTrue(metric["labels_confirmed"])
+            self.assertEqual(metric["settings_verified"], metric["id"] == "flakes")
+            self.assertIn(metric["label"], metric["grade_labels"])
+
+    def test_invalid_excluded_classes_are_rejected_in_configuration(self):
+        for excluded in ([True], [-1], [4], [0, 0], [0, 1, 2, 3], "0"):
+            with self.subTest(excluded=excluded):
+                configs = deepcopy(self.service.configs)
+                configs[0]["excluded_classes"] = excluded
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "invalid.json"
+                    path.write_text(json.dumps({"models": configs}), encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        read_config(path)
+
+    def test_confirmed_grade_mapping_requires_an_eligible_grade_for_each_class(self):
+        for grade_indices in ([None, 0, 1], [None, 0, 1, True], [None, 0, 1, 3], [None, None, 1, 2]):
+            with self.subTest(grade_indices=grade_indices):
+                configs = deepcopy(self.service.configs)
+                configs[0]["grade_indices"] = grade_indices
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "invalid.json"
+                    path.write_text(json.dumps({"models": configs}), encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        read_config(path)
+
+    def test_merge_cannot_drop_classes_or_use_an_unknown_grading_method(self):
+        for change in ({"excluded_classes": [0]}, {"grading_method": "highest_class_number"},
+                       {"grade_labels": ["정상", "중증"]}):
+            with self.subTest(change=change):
+                configs = deepcopy(self.service.configs)
+                configs[0].update(change)
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "invalid.json"
+                    path.write_text(json.dumps({"models": configs}), encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        read_config(path)
+
+
+class PreprocessingTests(unittest.TestCase):
+    def setUp(self):
+        self.configs = read_config(server.BASE_DIR / "model_config.json")
+        self.image = Image.new("RGB", (640, 360))
+        self.image.putdata([((x * 3) % 256, (y * 5) % 256, (x + y) % 256)
+                            for y in range(self.image.height) for x in range(self.image.width)])
+
+    def tearDown(self):
+        self.image.close()
+
+    def test_flakes_matches_training_square_resize_without_center_crop(self):
+        config = self.configs[0]
+        reference = transforms.Compose([
+            transforms.Resize((384, 384), interpolation=InterpolationMode.BICUBIC),
+            transforms.ToTensor(), transforms.Normalize(config["mean"], config["std"]),
+        ])
+        actual = inference.build_transform(config)(self.image)
+        self.assertEqual(tuple(actual.shape), (3, 384, 384))
+        torch.testing.assert_close(actual, reference(self.image), rtol=0, atol=0)
+        previous_crop = transforms.Compose([
+            transforms.Resize(384, interpolation=InterpolationMode.BICUBIC),
+            transforms.CenterCrop(384), transforms.ToTensor(),
+            transforms.Normalize(config["mean"], config["std"]),
+        ])
+        self.assertFalse(torch.equal(actual, previous_crop(self.image)))
+
+    def test_other_three_models_retain_their_previous_resize_and_crop(self):
+        for config in self.configs[1:]:
+            with self.subTest(model=config["id"]):
+                reference = transforms.Compose([
+                    transforms.Resize(config["resize_size"], interpolation=InterpolationMode(config["interpolation"])),
+                    transforms.CenterCrop(config["input_size"]), transforms.ToTensor(),
+                    transforms.Normalize(config["mean"], config["std"]),
+                ])
+                torch.testing.assert_close(inference.build_transform(config)(self.image),
+                                           reference(self.image), rtol=0, atol=0)
 
 
 if __name__ == "__main__":

@@ -17,6 +17,8 @@ from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 KEY = "scalp-ai-model-records-v2"
+GRADES = ("정상", "경증", "중증")
+FLAKES_GRADES = ("정상", "경중등도", "중증")
 
 
 def browser_executable():
@@ -56,7 +58,85 @@ def assert_result(result, count):
         for k, value in enumerate(metric["probabilities"]):
             expected = sum(p["metrics"][j]["probabilities"][k] for p in result["per_photo"]) / count
             assert abs(value - expected) < 1e-6
-        assert metric["class_index"] == max(range(len(metric["probabilities"])), key=metric["probabilities"].__getitem__)
+        assert_grade_metric(metric, j)
+    for photo in result["per_photo"]:
+        for index, metric in enumerate(photo["metrics"]):
+            assert_grade_metric(metric, index)
+
+
+def assert_grade_metric(metric, index):
+    raw = metric["probabilities"]
+    grade_probs = [raw[0], raw[1] + raw[2], raw[3]] if index == 0 else raw
+    labels = FLAKES_GRADES if index == 0 else GRADES
+    predicted = max(range(len(raw)), key=raw.__getitem__)
+    grade = max(range(3), key=grade_probs.__getitem__)
+    assert metric["excluded_classes"] == []
+    assert metric["class_index"] == predicted
+    assert metric["grade_index"] == grade
+    assert metric["label"] == labels[grade]
+    assert metric["grade_labels"] == list(labels)
+    assert all(abs(a - b) < 1e-6 for a, b in zip(metric["grade_probabilities"], grade_probs))
+    assert abs(sum(metric["grade_probabilities"]) - 1) < 1e-5
+    assert abs(metric["grade_confidence"] - grade_probs[grade]) < 1e-6
+    assert metric["grading_method"] == ("probability_merge" if index == 0 else "argmax")
+    assert metric["labels_confirmed"] is True
+    assert metric["settings_verified"] is (index == 0)
+    assert abs(metric["confidence"] - raw[predicted]) < 1e-6
+    if index == 0:
+        assert metric["preprocessing_version"] == "flakes-384-square-v1"
+
+
+def assert_grade_presentation(page):
+    text = page.locator("#main").inner_text()
+    assert "%" not in text, text
+    assert "참고번호" not in text, text
+    assert "모델 점수" not in text, text
+
+
+def assert_legacy_grade_mapping(page):
+    # Raw legacy values remain intact; grade display restores zero and merges 1 + 2.
+    for model_id in ("flakes", "sebum", "hair_loss", "erythema"):
+        labels = FLAKES_GRADES if model_id == "flakes" else GRADES
+        for grade, label in enumerate(labels):
+            if model_id == "flakes":
+                probabilities = ([0.7, 0.1, 0.1, 0.1], [0.01, 0.307, 0.336, 0.347],
+                                 [0.1, 0.1, 0.1, 0.7])[grade]
+                raw_index = max(range(4), key=probabilities.__getitem__)
+            else:
+                probabilities = [0.1, 0.1, 0.1]
+                probabilities[grade] = 0.8
+                raw_index = grade
+            metric = {
+                "id": model_id, "label": f"클래스 {raw_index}", "class_index": raw_index,
+                "confidence": probabilities[raw_index], "probabilities": probabilities,
+                "class_labels": [f"클래스 {i}" for i in range(len(probabilities))],
+                "settings_verified": False,
+            }
+            index = ("flakes", "sebum", "hair_loss", "erythema").index(model_id)
+            actual = page.evaluate(
+                """({metric, index}) => ({valid: validMetric(metric, index),
+                    grade: metricGrade(metric), label: metricLabel(metric)})""",
+                {"metric": metric, "index": index},
+            )
+            assert actual == {"valid": True, "grade": grade, "label": label}, actual
+    prior_exclusion = {
+        "id": "flakes", "label": "경증", "class_index": 2,
+        "confidence": 0.1, "probabilities": [0.8, 0.05, 0.1, 0.05],
+        "class_labels": ["제외", *GRADES], "settings_verified": False,
+        "labels_confirmed": True, "grade_index": 1, "excluded_classes": [0],
+    }
+    actual = page.evaluate("metric => ({valid: validMetric(metric, 0), label: metricLabel(metric)})", prior_exclusion)
+    assert actual == {"valid": True, "label": "정상"}, actual
+
+
+def assert_new_grade_metadata(page, metric):
+    assert page.evaluate("metric => validMetric(metric, 0)", metric) is True
+    inconsistent = json.loads(json.dumps(metric))
+    inconsistent["grade_probabilities"] = [0.1, 0.2, 0.7]
+    assert page.evaluate("metric => validMetric(metric, 0)", inconsistent) is False
+    inconsistent = json.loads(json.dumps(metric))
+    inconsistent["grade_index"] = (metric["grade_index"] + 1) % 3
+    assert page.evaluate("metric => validMetric(metric, 0)", inconsistent) is False
 
 
 def ready(page):
@@ -139,6 +219,8 @@ def main():
         expect(page.locator(".sidebar")).to_have_count(0)
         expect(page.locator(".journey")).to_be_visible()
         expect(page.locator('[data-action="analyze"]')).to_have_count(0)
+        assert_legacy_grade_mapping(page)
+        assert_grade_presentation(page)
         screenshot(page, output, "analysis-desktop.png")
 
         # Skipping navigation must keep the current page and move focus to its content.
@@ -190,15 +272,16 @@ def main():
         assert response.ok, response.text()
         result = response.json()
         assert_result(result, 3)
+        assert_new_grade_metadata(page, result["metrics"][0])
         page.wait_for_url("**#report")
         expect(page.locator(".metric")).to_have_count(4)
+        expect(page.locator('[data-legacy-analysis]')).to_have_count(0)
         for index, metric in enumerate(result["metrics"]):
-            label = metric["label"] if metric["settings_verified"] else f"참고번호 {metric['class_index']}"
-            expect(page.locator(".metric-value").nth(index)).to_have_text(label)
+            expect(page.locator(".metric-value").nth(index)).to_have_text(metric["label"])
         open_details_for(page, ".photo-results")
         expect(page.locator(".photo-results tbody tr")).to_have_count(3)
-        open_details_for(page, ".probability-list")
-        expect(page.locator(".probability-list")).to_have_count(4)
+        expect(page.locator(".probability-list")).to_have_count(0)
+        assert_grade_presentation(page)
 
         page.locator('[data-action="save"]').click()
         saved = page.evaluate("key => JSON.parse(localStorage.getItem(key))", KEY)
@@ -209,11 +292,48 @@ def main():
         assert "blob:" not in encoded and "data:image" not in encoded and "synthetic-integration" not in encoded
         screenshot(page, output, "report-desktop.png")
 
+        # Reopening a prior 256px/zero-excluded record regrades only, not a new inference.
+        legacy = json.loads(json.dumps(saved[0]))
+        legacy["id"] = "legacy-before-flakes-training-fix"
+        legacy["configuration_id"] = "legacy-256-configuration"
+        for metric in [legacy["metrics"][0], *[p["metrics"][0] for p in legacy["per_photo"]]]:
+            raw = metric["probabilities"]
+            previous_index = max((1, 2, 3), key=raw.__getitem__)
+            metric["class_index"] = previous_index
+            metric["confidence"] = raw[previous_index]
+            metric["label"] = GRADES[previous_index - 1]
+            metric["class_labels"] = ["제외", *GRADES]
+            metric["excluded_classes"] = [0]
+            metric["grade_index"] = previous_index - 1
+            metric["settings_verified"] = False
+            for field in ("grade_probabilities", "grade_labels", "grade_confidence", "grading_method",
+                          "grade_indices", "preprocessing_version"):
+                metric.pop(field, None)
+        page.evaluate("({key, records}) => localStorage.setItem(key, JSON.stringify(records))",
+                      {"key": KEY, "records": [*saved, legacy]})
+        page.locator('[data-nav="history"]').click()
+        expect(page.locator('[data-record]')).to_have_count(2)
+        page.locator('[data-record="legacy-before-flakes-training-fix"]').click()
+        expect(page.locator('[data-legacy-analysis]')).to_be_visible()
+        expect(page.locator('[data-legacy-analysis]')).to_contain_text("이전 분석 설정")
+        expect(page.locator('[data-legacy-analysis]')).to_contain_text("다시 분석")
+        expected_legacy_grade = max(range(3), key=result["metrics"][0]["grade_probabilities"].__getitem__)
+        expect(page.locator('.metric-value').first).to_have_text(FLAKES_GRADES[expected_legacy_grade])
+        persisted = page.evaluate("key => JSON.parse(localStorage.getItem(key))", KEY)
+        assert persisted[1] == legacy, "Viewing legacy data must not overwrite its raw values"
+        page.evaluate("({key, records}) => localStorage.setItem(key, JSON.stringify(records))",
+                      {"key": KEY, "records": saved})
+
         page.reload()
         expect(page.locator(".empty-state")).to_have_count(1)
         page.locator('[data-nav="history"]').click()
         expect(page.locator("[data-record]")).to_have_count(1)
         expect(page.locator(".chart circle")).to_have_count(4)
+        open_details_for(page, '.chart')
+        assert_grade_presentation(page)
+        expect(page.locator('.chart')).to_contain_text("정상")
+        expect(page.locator('.chart')).to_contain_text("중간")
+        expect(page.locator('.chart')).to_contain_text("중증")
         day = page.locator('[data-date]').first
         selected_date = day.get_attribute('data-date')
         day.focus()
@@ -241,6 +361,7 @@ def main():
             page.locator("[data-record]").click()
             expect(page.locator(".metric")).to_have_count(4)
             assert_layout(page, output, width, "report")
+            assert_grade_presentation(page)
             if width == 390:
                 screenshot(page, output, "report-mobile.png")
 
@@ -286,7 +407,7 @@ def main():
     print(json.dumps({
         "result": "PASS", "models": 4, "three_photo_ms": result["elapsed_ms"],
         "one_photo_ms": one["elapsed_ms"], "configuration_id": result["configuration_id"],
-        "checks": "guided steps, keyboard navigation, bulk/drop/remove, preserved photos, no premature upload, real inference, "
+        "checks": "training-aligned flakes probability merging, restored class zero, legacy records, no displayed percentages, guided steps, keyboard navigation, bulk/drop/remove, preserved photos, no premature upload, real inference, "
                   "mean aggregation, storage/reload, history, 320/390/768 layouts, API failure/retry, file entry",
     }, ensure_ascii=False))
 
