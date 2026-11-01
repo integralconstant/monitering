@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 KEY = "scalp-ai-model-records-v2"
 GRADES = ("정상", "경증", "중증")
 FLAKES_GRADES = ("정상", "경중등도", "중증")
+SEBUM_GRADES = ("무", "유")
 
 
 def browser_executable():
@@ -66,10 +67,11 @@ def assert_result(result, count):
 
 def assert_grade_metric(metric, index):
     raw = metric["probabilities"]
-    grade_probs = [raw[0], raw[1] + raw[2], raw[3]] if index == 0 else raw
-    labels = FLAKES_GRADES if index == 0 else GRADES
+    grade_probs = ([raw[0], raw[1] + raw[2], raw[3]] if index == 0
+                   else [raw[0], raw[1] + raw[2]] if index == 1 else raw)
+    labels = FLAKES_GRADES if index == 0 else SEBUM_GRADES if index == 1 else GRADES
     predicted = max(range(len(raw)), key=raw.__getitem__)
-    grade = max(range(3), key=grade_probs.__getitem__)
+    grade = max(range(len(grade_probs)), key=grade_probs.__getitem__)
     assert metric["excluded_classes"] == []
     assert metric["class_index"] == predicted
     assert metric["grade_index"] == grade
@@ -78,12 +80,40 @@ def assert_grade_metric(metric, index):
     assert all(abs(a - b) < 1e-6 for a, b in zip(metric["grade_probabilities"], grade_probs))
     assert abs(sum(metric["grade_probabilities"]) - 1) < 1e-5
     assert abs(metric["grade_confidence"] - grade_probs[grade]) < 1e-6
-    assert metric["grading_method"] == ("probability_merge" if index == 0 else "argmax")
+    assert metric["grading_method"] == ("probability_merge" if index in (0, 1) else "argmax")
     assert metric["labels_confirmed"] is True
-    assert metric["settings_verified"] is (index == 0)
+    assert metric["settings_verified"] is (index in (0, 1))
     assert abs(metric["confidence"] - raw[predicted]) < 1e-6
     if index == 0:
         assert metric["preprocessing_version"] == "flakes-384-square-v1"
+    if index == 1:
+        assert metric["preprocessing_version"] == "sebum-384-attention-v1"
+        assert metric["grade_indices"] == [0, 1, 1]
+
+
+def set_probabilities(metric, probabilities):
+    """Create consistent grade metadata for a fixture using the real result schema."""
+    metric["probabilities"] = list(probabilities)
+    raw_index = max(range(len(probabilities)), key=probabilities.__getitem__)
+    if metric["id"] == "flakes":
+        merged, labels = [probabilities[0], probabilities[1] + probabilities[2], probabilities[3]], FLAKES_GRADES
+    elif metric["id"] == "sebum" and metric.get("preprocessing_version") == "sebum-384-attention-v1":
+        merged, labels = [probabilities[0], probabilities[1] + probabilities[2]], SEBUM_GRADES
+    else:
+        merged, labels = list(probabilities), GRADES
+    grade = max(range(len(merged)), key=merged.__getitem__)
+    metric.update(class_index=raw_index, confidence=probabilities[raw_index],
+                  grade_probabilities=merged, grade_index=grade, label=labels[grade],
+                  grade_labels=list(labels), grade_confidence=merged[grade])
+    return metric
+
+
+def legacy_sebum_metric(metric):
+    """Historical model output remains its original three grades, not binary presence."""
+    metric.update(class_labels=list(GRADES), labels_confirmed=True, grade_indices=[0, 1, 2],
+                  grading_method="argmax", excluded_classes=[], settings_verified=False)
+    metric.pop("preprocessing_version", None)
+    return set_probabilities(metric, [0.4, 0.35, 0.25])
 
 
 def assert_grade_presentation(page):
@@ -139,6 +169,25 @@ def assert_new_grade_metadata(page, metric):
     assert page.evaluate("metric => validMetric(metric, 0)", inconsistent) is False
 
 
+def assert_sebum_binary_metadata(page, metric):
+    fixture = set_probabilities(json.loads(json.dumps(metric)), [0.4, 0.35, 0.25])
+    actual = page.evaluate("metric => ({valid: validMetric(metric, 1), grade: metricGrade(metric), label: metricLabel(metric)})", fixture)
+    assert actual == {"valid": True, "grade": 1, "label": "유"}, actual
+    for change in ({"grade_probabilities": [0.4, 0.35, 0.25]}, {"grade_index": 2},
+                   {"grade_labels": list(GRADES)}, {"grade_indices": [0, 1, 2]},
+                   {"label": "경증"}, {"grading_method": "argmax"},
+                   {"preprocessing_version": "unknown-sebum-model"}):
+        inconsistent = json.loads(json.dumps(fixture))
+        inconsistent.update(change)
+        assert page.evaluate("metric => validMetric(metric, 1)", inconsistent) is False, change
+    missing_marker = json.loads(json.dumps(fixture))
+    missing_marker.pop("preprocessing_version")
+    assert page.evaluate("metric => validMetric(metric, 1)", missing_marker) is False
+    legacy = legacy_sebum_metric(json.loads(json.dumps(fixture)))
+    actual = page.evaluate("metric => ({valid: validMetric(metric, 1), grade: metricGrade(metric), label: metricLabel(metric)})", legacy)
+    assert actual == {"valid": True, "grade": 0, "label": "정상"}, actual
+
+
 def ready(page):
     page.wait_for_function("document.querySelector('#server-status').textContent === 'AI 모델 연결됨'")
 
@@ -149,6 +198,73 @@ def next_step(page):
 
 def expect_photos(page, count):
     expect(page.locator(".upload-slot img")).to_have_count(count)
+
+
+def return_from_file_dialog(page):
+    # Native pickers return window focus before delivering the input change.
+    # Exercise that order; set_input_files alone misses a detached file input.
+    with page.expect_response(lambda response: response.url.endswith("/api/auth/me")) as pending:
+        page.evaluate('window.dispatchEvent(new Event("focus"))')
+    assert pending.value.ok
+    pending.value.json()
+    page.wait_for_function("!checkingFocusedAccount")
+
+
+def assert_picker_survives_account_focus(page):
+    with page.expect_file_chooser() as pending:
+        page.locator('[data-action="select-photos"]').click()
+    bulk = pending.value
+    return_from_file_dialog(page)
+    assert bulk.element.evaluate("input => input.isConnected"), "Account refresh detached the open bulk picker"
+    bulk.set_files(test_photo(0))
+    expect_photos(page, 1)
+
+    with page.expect_file_chooser() as pending:
+        page.locator('label[for="photo-1"]').click()
+    single = pending.value
+    return_from_file_dialog(page)
+    assert single.element.evaluate("input => input.isConnected"), "Account refresh detached the open slot picker"
+    single.set_files(test_photo(1))
+    expect_photos(page, 2)
+
+    existing = page.locator(".upload-slot img").evaluate_all("images => images.map(image => image.src)")
+    with page.expect_file_chooser() as pending:
+        page.locator('[data-action="select-photos"]').click()
+    cancelled = pending.value
+    return_from_file_dialog(page)
+    assert cancelled.element.evaluate("input => input.isConnected")
+    cancelled.set_files([])
+    expect_photos(page, 2)
+    assert page.locator(".upload-slot img").evaluate_all("images => images.map(image => image.src)") == existing
+
+    # A failed background identity request must also leave the picker usable.
+    original = page.locator("#photos-bulk").element_handle()
+    def unavailable_account(route):
+        route.abort()
+    page.route("**/api/auth/me", unavailable_account)
+    try:
+        with page.expect_event("requestfailed", predicate=lambda request: request.url.endswith("/api/auth/me")):
+            page.evaluate('window.dispatchEvent(new Event("focus"))')
+        page.wait_for_function("!checkingFocusedAccount")
+        assert original.evaluate("input => input.isConnected")
+        assert page.locator(".upload-slot img").evaluate_all("images => images.map(image => image.src)") == existing
+    finally:
+        page.unroute("**/api/auth/me", unavailable_account)
+
+    # An unchanged identity also keeps input values and nodes while a form is open.
+    page.locator('[data-remove="1"]').click()
+    page.locator('[data-remove="0"]').click()
+    expect_photos(page, 0)
+    page.goto(page.url.split("#")[0] + "#register")
+    page.locator("#auth-nickname").fill("picker-focus-draft")
+    page.locator("#auth-password").fill("246810")
+    password = page.locator("#auth-password").element_handle()
+    return_from_file_dialog(page)
+    assert password.evaluate("input => input.isConnected"), "Quiet account refresh replaced an unchanged form"
+    expect(page.locator("#auth-nickname")).to_have_value("picker-focus-draft")
+    expect(page.locator("#auth-password")).to_have_value("246810")
+    page.locator('[data-nav="analysis"]').click()
+    expect(page.locator("#photos-bulk")).to_have_count(1)
 
 
 def screenshot(page, output, name):
@@ -224,12 +340,13 @@ def main():
         screenshot(page, output, "analysis-desktop.png")
 
         # Skipping navigation must keep the current page and move focus to its content.
-        page.locator('[data-nav="care"]').click()
+        page.locator('[data-nav="guide"]').click()
         expect(page.locator("h1")).to_have_text("이렇게 찍으면 준비 끝이에요.")
+        expect(page.locator("h1")).to_be_focused()
         page.locator(".skip-link").focus()
         page.keyboard.press("Enter")
         expect(page.locator("#main")).to_be_focused()
-        assert page.evaluate("location.hash") == "#care"
+        assert page.evaluate("location.hash") == "#guide"
         page.locator('[data-nav="analysis"]').click()
         expect(page.locator('[data-action="next"]')).to_be_visible()
 
@@ -237,6 +354,8 @@ def main():
         next_step(page)
         expect(page.locator("#photos-bulk")).to_have_count(1)
         expect(page.locator('[data-action="next"]')).to_be_disabled()
+        assert not analysis_requests
+        assert_picker_survives_account_focus(page)
         assert not analysis_requests
         page.locator("#photo-0").set_input_files(
             {"name": "invalid.svg", "mimeType": "image/svg+xml", "buffer": b"<svg/>"}
@@ -273,6 +392,7 @@ def main():
         result = response.json()
         assert_result(result, 3)
         assert_new_grade_metadata(page, result["metrics"][0])
+        assert_sebum_binary_metadata(page, result["metrics"][1])
         page.wait_for_url("**#report")
         expect(page.locator(".metric")).to_have_count(4)
         expect(page.locator('[data-legacy-analysis]')).to_have_count(0)
@@ -309,6 +429,8 @@ def main():
             for field in ("grade_probabilities", "grade_labels", "grade_confidence", "grading_method",
                           "grade_indices", "preprocessing_version"):
                 metric.pop(field, None)
+        for metric in [legacy["metrics"][1], *[photo["metrics"][1] for photo in legacy["per_photo"]]]:
+            legacy_sebum_metric(metric)
         page.evaluate("({key, records}) => localStorage.setItem(key, JSON.stringify(records))",
                       {"key": KEY, "records": [*saved, legacy]})
         page.locator('[data-nav="history"]').click()
@@ -319,8 +441,15 @@ def main():
         expect(page.locator('[data-legacy-analysis]')).to_contain_text("다시 분석")
         expected_legacy_grade = max(range(3), key=result["metrics"][0]["grade_probabilities"].__getitem__)
         expect(page.locator('.metric-value').first).to_have_text(FLAKES_GRADES[expected_legacy_grade])
+        expect(page.locator('.metric-value').nth(1)).to_have_text("정상")
+        expect(page.locator('[data-legacy-sebum]')).to_be_visible()
+        expect(page.locator('[data-legacy-sebum]')).to_contain_text("이전 피지 모델")
         persisted = page.evaluate("key => JSON.parse(localStorage.getItem(key))", KEY)
         assert persisted[1] == legacy, "Viewing legacy data must not overwrite its raw values"
+        page.locator('[data-nav="history"]').click()
+        expect(page.locator("[data-severity-chart] circle")).to_have_count(4)
+        expect(page.locator("[data-sebum-chart]")).to_have_count(0)
+        page.locator('[data-record="legacy-before-flakes-training-fix"]').click()
         page.evaluate("({key, records}) => localStorage.setItem(key, JSON.stringify(records))",
                       {"key": KEY, "records": saved})
 
@@ -328,12 +457,16 @@ def main():
         expect(page.locator(".empty-state")).to_have_count(1)
         page.locator('[data-nav="history"]').click()
         expect(page.locator("[data-record]")).to_have_count(1)
-        expect(page.locator(".chart circle")).to_have_count(4)
+        expect(page.locator("[data-severity-chart] circle")).to_have_count(3)
+        expect(page.locator("[data-sebum-chart] circle")).to_have_count(1)
         open_details_for(page, '.chart')
         assert_grade_presentation(page)
-        expect(page.locator('.chart')).to_contain_text("정상")
-        expect(page.locator('.chart')).to_contain_text("중간")
-        expect(page.locator('.chart')).to_contain_text("중증")
+        expect(page.locator('[data-severity-chart]')).to_contain_text("정상")
+        expect(page.locator('[data-severity-chart]')).to_contain_text("중간")
+        expect(page.locator('[data-severity-chart]')).to_contain_text("중증")
+        expect(page.locator('[data-sebum-chart]')).to_contain_text("무")
+        expect(page.locator('[data-sebum-chart]')).to_contain_text("유")
+        assert "피지" not in page.locator("[data-severity-chart]").text_content()
         day = page.locator('[data-date]').first
         selected_date = day.get_attribute('data-date')
         day.focus()
@@ -353,7 +486,7 @@ def main():
         # Check the real report and the other routes at small, phone, and tablet widths.
         for width in (320, 390, 768):
             page.set_viewport_size({"width": width, "height": 900})
-            for route in ("analysis", "history", "care", "about"):
+            for route in ("analysis", "history", "guide", "care", "about"):
                 page.goto(url + f"/?layout={width}-{route}#" + route)
                 page.wait_for_function("document.querySelector('#main').children.length > 0")
                 assert_layout(page, output, width, route)
@@ -407,7 +540,7 @@ def main():
     print(json.dumps({
         "result": "PASS", "models": 4, "three_photo_ms": result["elapsed_ms"],
         "one_photo_ms": one["elapsed_ms"], "configuration_id": result["configuration_id"],
-        "checks": "training-aligned flakes probability merging, restored class zero, legacy records, no displayed percentages, guided steps, keyboard navigation, bulk/drop/remove, preserved photos, no premature upload, real inference, "
+        "checks": "training-aligned flakes and binary sebum merging, separate sebum chart, preserved legacy three-grade sebum, restored class zero, legacy records, no displayed percentages, guided steps, keyboard navigation, native picker focus/selection/cancel and failed identity refresh, bulk/drop/remove, preserved photos, no premature upload, real inference, "
                   "mean aggregation, storage/reload, history, 320/390/768 layouts, API failure/retry, file entry",
     }, ensure_ascii=False))
 

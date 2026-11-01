@@ -60,7 +60,9 @@ class RecordingService:
 class UploadApiTests(unittest.TestCase):
     def setUp(self):
         self.service = RecordingService()
-        self.app = server.create_app(self.service)
+        temporary_database = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_database.cleanup)
+        self.app = server.create_app(self.service, database_path=Path(temporary_database.name) / "test.sqlite3")
         self.app.config["TESTING"] = True
         self.client = self.app.test_client()
 
@@ -218,15 +220,17 @@ class AggregationTests(unittest.TestCase):
             expected = [1.1 / 3, 0.9 / 3, 0.75 / 3, 0.25 / 3] if metric["id"] == "flakes" else [0.4, 1 / 3, 0.8 / 3]
             torch.testing.assert_close(torch.tensor(metric["probabilities"]), torch.tensor(expected))
             self.assertEqual(metric["class_index"], 0)
-            self.assertEqual(metric["grade_index"], 1 if metric["id"] == "flakes" else 0)
-            self.assertEqual(metric["label"], "경중등도" if metric["id"] == "flakes" else "정상")
-            expected_grades = [1.1 / 3, 1.65 / 3, 0.25 / 3] if metric["id"] == "flakes" else expected
+            self.assertEqual(metric["grade_index"], 1 if metric["id"] in {"flakes", "sebum"} else 0)
+            self.assertEqual(metric["label"], {"flakes": "경중등도", "sebum": "유"}.get(metric["id"], "정상"))
+            expected_grades = ([1.1 / 3, 1.65 / 3, 0.25 / 3] if metric["id"] == "flakes"
+                               else [0.4, 0.6] if metric["id"] == "sebum" else expected)
             torch.testing.assert_close(torch.tensor(metric["grade_probabilities"]), torch.tensor(expected_grades))
             self.assertTrue(metric["labels_confirmed"])
             self.assertAlmostEqual(sum(metric["probabilities"]), 1, places=6)
         for photo, expected_indices in zip(result["per_photo"], ([0, 0, 0, 0], [1, 1, 1, 1], [2, 2, 2, 2])):
             self.assertEqual([m["class_index"] for m in photo["metrics"]], expected_indices)
         self.assertEqual([p["metrics"][0]["grade_index"] for p in result["per_photo"]], [0, 1, 1])
+        self.assertEqual([p["metrics"][1]["grade_index"] for p in result["per_photo"]], [0, 1, 1])
         self.assertFalse(result["settings_verified"])
         self.assertTrue(result["warnings"])
         self.assertEqual(result["configuration_id"], "test-configuration")
@@ -305,7 +309,7 @@ class GradeMappingTests(unittest.TestCase):
                 self.assertEqual(result["preprocessing_version"], "flakes-384-square-v1")
 
     def test_other_models_select_the_highest_probability_instead_of_the_highest_class_number(self):
-        for model_id in ("sebum", "hair_loss", "erythema"):
+        for model_id in ("hair_loss", "erythema"):
             for selected, label in enumerate(("정상", "경증", "중증")):
                 with self.subTest(model=model_id, selected=selected):
                     probabilities = [0.1, 0.1, 0.1]
@@ -318,14 +322,48 @@ class GradeMappingTests(unittest.TestCase):
                     self.assertEqual(result["grade_probabilities"], probabilities)
                     self.assertEqual(result["grading_method"], "argmax")
 
-    def test_only_flakes_preprocessing_is_confirmed_by_the_provided_training_code(self):
+    def test_flakes_and_sebum_are_verified_while_other_two_remain_unverified(self):
         result = self.service.analyze([object()])
         self.assertFalse(result["settings_verified"])
         self.assertTrue(result["warnings"])
+        self.assertIn("탈모", " ".join(result["warnings"]))
+        self.assertIn("모낭사이홍반", " ".join(result["warnings"]))
+        self.assertNotIn("피지", " ".join(result["warnings"]))
         for metric in result["metrics"]:
             self.assertTrue(metric["labels_confirmed"])
-            self.assertEqual(metric["settings_verified"], metric["id"] == "flakes")
+            self.assertEqual(metric["settings_verified"], metric["id"] in {"flakes", "sebum"})
             self.assertIn(metric["label"], metric["grade_labels"])
+
+    def test_sebum_sums_present_probabilities_before_deciding_binary_presence(self):
+        for probabilities, expected_grade, expected_label in [
+            ([0.4, 0.35, 0.25], 1, "유"),
+            ([0.75, 0.15, 0.1], 0, "무"),
+            ([0.2, 0.1, 0.7], 1, "유"),
+            ([0.5, 0.25, 0.25], 0, "무"),
+        ]:
+            with self.subTest(probabilities=probabilities):
+                metric = self.service._metric(self.configs["sebum"], probabilities)
+                self.assertEqual(metric["class_index"], max(range(3), key=probabilities.__getitem__))
+                self.assertEqual(metric["grade_index"], expected_grade)
+                self.assertEqual(metric["label"], expected_label)
+                self.assertEqual(metric["grade_labels"], ["무", "유"])
+                self.assertEqual(metric["grade_indices"], [0, 1, 1])
+                torch.testing.assert_close(torch.tensor(metric["grade_probabilities"]),
+                                           torch.tensor([probabilities[0], probabilities[1] + probabilities[2]]))
+                self.assertEqual(metric["confidence"], probabilities[metric["class_index"]])
+                self.assertEqual(metric["grade_confidence"], metric["grade_probabilities"][expected_grade])
+                self.assertEqual(metric["grading_method"], "probability_merge")
+                self.assertEqual(metric["preprocessing_version"], "sebum-384-attention-v1")
+                self.assertTrue(metric["settings_verified"])
+
+    def test_binary_grade_configuration_rejects_indices_outside_its_two_labels(self):
+        configs = deepcopy(self.service.configs)
+        configs[1]["grade_indices"] = [0, 1, 2]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "invalid-binary.json"
+            path.write_text(json.dumps({"models": configs}), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                read_config(path)
 
     def test_invalid_excluded_classes_are_rejected_in_configuration(self):
         for excluded in ([True], [-1], [4], [0, 0], [0, 1, 2, 3], "0"):
@@ -388,8 +426,20 @@ class PreprocessingTests(unittest.TestCase):
         ])
         self.assertFalse(torch.equal(actual, previous_crop(self.image)))
 
-    def test_other_three_models_retain_their_previous_resize_and_crop(self):
-        for config in self.configs[1:]:
+    def test_sebum_matches_package_square_resize_on_a_rectangular_photo(self):
+        config = self.configs[1]
+        self.assertEqual(config["input_size"], 384)
+        self.assertEqual(config["resize_mode"], "squash")
+        reference = transforms.Compose([
+            transforms.Resize((384, 384), interpolation=InterpolationMode.BICUBIC),
+            transforms.ToTensor(), transforms.Normalize(config["mean"], config["std"]),
+        ])
+        actual = inference.build_transform(config)(self.image)
+        self.assertEqual(tuple(actual.shape), (3, 384, 384))
+        torch.testing.assert_close(actual, reference(self.image), rtol=0, atol=0)
+
+    def test_other_two_models_retain_their_previous_resize_and_crop(self):
+        for config in self.configs[2:]:
             with self.subTest(model=config["id"]):
                 reference = transforms.Compose([
                     transforms.Resize(config["resize_size"], interpolation=InterpolationMode(config["interpolation"])),

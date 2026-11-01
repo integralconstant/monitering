@@ -98,6 +98,20 @@ def read_config(path: Path) -> list[dict]:
             raise ValueError("지원하지 않는 특징 결합입니다.")
         if c.get("head_activation", "identity") not in {"identity", "gelu", "relu"}:
             raise ValueError("지원하지 않는 head 활성화입니다.")
+        classifier = c.get("classifier", "default")
+        if classifier not in {"default", "sebum_attention_fusion"}:
+            raise ValueError("지원하지 않는 분류기 구현입니다.")
+        if classifier == "sebum_attention_fusion" and (
+            c["id"] != "sebum" or c["architecture"] != "vit_base_patch16_dinov3"
+            or c["input_size"] != 384 or c.get("resize_mode") != "squash"
+        ):
+            raise ValueError("새 피지 분류기는 DINOv3의 384 정사각 입력을 사용해야 합니다.")
+        bundled = c.get("bundled_path")
+        if bundled is not None and (
+            not isinstance(bundled, str) or not bundled
+            or Path(bundled).is_absolute() or not (BASE_DIR / bundled).resolve().is_relative_to(BASE_DIR)
+        ):
+            raise ValueError("내장 모델 경로는 프로젝트 안의 상대 경로여야 합니다.")
         labels = c.get("labels")
         if labels is not None and (
             not isinstance(labels, list) or len(labels) != c["num_classes"]
@@ -127,11 +141,14 @@ def read_config(path: Path) -> list[dict]:
             raise ValueError("지원하지 않는 등급 산출 방식입니다.")
         grade_labels = c.get("grade_labels", list(GRADE_LABELS))
         if (
-            not isinstance(grade_labels, list) or len(grade_labels) != 3
+            not isinstance(grade_labels, list) or len(grade_labels) not in {2, 3}
+            or (len(grade_labels) == 2 and c["id"] != "sebum")
             or not all(isinstance(v, str) and 0 < len(v) < 100 for v in grade_labels)
-            or len(set(grade_labels)) != 3
+            or len(set(grade_labels)) != len(grade_labels)
         ):
-            raise ValueError("최종 등급 이름은 서로 다른 문자열 3개여야 합니다.")
+            raise ValueError("최종 판정 이름은 서로 다른 문자열이어야 하며 피지 유무는 2개, 등급은 3개입니다.")
+        if grades is not None and any(v is not None and v >= len(grade_labels) for v in grades):
+            raise ValueError("클래스 매핑이 최종 판정 범위를 벗어났습니다.")
         if method == "probability_merge" and (excluded or grades is None or any(v is None for v in grades)):
             raise ValueError("확률 합산은 모든 원시 클래스를 최종 등급에 포함해야 합니다.")
         if c.get("labels_confirmed") is True:
@@ -152,6 +169,7 @@ def read_config(path: Path) -> list[dict]:
 class ModelService:
     def __init__(self, model_dir: Path | None = None, config_path: Path | None = None):
         self.configs = read_config(config_path or BASE_DIR / "model_config.json")
+        self._explicit_model_dir = model_dir is not None or bool(os.environ.get("SCALP_MODEL_DIR"))
         self.model_dir = model_dir or self._find_model_dir()
         requested_device = os.environ.get("SCALP_DEVICE", "cpu")
         if requested_device not in {"cpu", "cuda"}:
@@ -177,6 +195,15 @@ class ModelService:
             return local
         return Path.home() / "Downloads" / "scalp_4indicator_models"
 
+    def _model_path(self, config: dict) -> Path:
+        configured = self.model_dir / config["filename"]
+        if configured.is_file() or self._explicit_model_dir:
+            return configured
+        bundled = config.get("bundled_path")
+        if bundled:
+            return BASE_DIR / bundled
+        return configured
+
     def start_loading(self):
         threading.Thread(target=self.load, name="model-loader", daemon=True).start()
 
@@ -185,16 +212,21 @@ class ModelService:
             if self.status == "ready":
                 return
             try:
-                missing = [c["filename"] for c in self.configs if not (self.model_dir / c["filename"]).is_file()]
+                missing = [c["filename"] for c in self.configs if not self._model_path(c).is_file()]
                 if missing:
                     raise FileNotFoundError("모델 파일을 찾을 수 없습니다: " + ", ".join(missing))
                 signature = hashlib.sha256(json.dumps(self.configs, sort_keys=True).encode())
                 for c in self.configs:
-                    path = self.model_dir / c["filename"]
+                    path = self._model_path(c)
                     checkpoint = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
                     if not isinstance(checkpoint, dict) or not all(isinstance(v, torch.Tensor) for v in checkpoint.values()):
                         raise ValueError(f"{c['id']}: 순수 state_dict 형식이 아닙니다.")
-                    if c["architecture"] == "efficientnet_b4":
+                    if c.get("classifier") == "sebum_attention_fusion":
+                        # Use the supplied, unchanged inference module. It retains
+                        # the learned block norms, attention pools and auxiliary head4.
+                        from model_packages.sebum.predict import ScalpNet
+                        model = ScalpNet()
+                    elif c["architecture"] == "efficientnet_b4":
                         model = models.efficientnet_b4(weights=None, num_classes=c["num_classes"])
                     else:
                         model = DinoClassifier(c)
@@ -268,7 +300,7 @@ class ModelService:
                 if grades[raw_index] is not None:
                     grade_probabilities[grades[raw_index]] += values[raw_index]
             if method == "probability_merge":
-                # Merge mild + moderate probabilities before selecting the final grade.
+                # Sum mapped probabilities before selecting the final label (three grades or binary presence).
                 grade_index = max(range(len(grade_probabilities)), key=grade_probabilities.__getitem__)
             else:
                 grade_index = grades[index]

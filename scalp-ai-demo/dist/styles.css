@@ -632,3 +632,131 @@ td small { font-size: 12px; color: var(--muted); }
   .report-grid { grid-template-columns: 1fr 1fr; }
   .table-scroll { overflow: visible; }
 }
+
+/* Account and daily care share the photo flow's typography and surfaces. */
+.header-inner { display: grid; grid-template-columns: minmax(0,1fr) auto; column-gap: 24px; row-gap: 12px; padding-top: 17px; padding-bottom: 10px; }
+.brand { grid-column: 1; grid-row: 1; min-width: 0; max-width: 590px; }
+.brand-copy { min-width: 0; }
+.brand-copy strong { font-size: 21px; letter-spacing: -.055em; }
+.site-nav { grid-column: 1 / -1; grid-row: 2; justify-self: center; }
+.account-menu { grid-column: 2; grid-row: 1; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 7px 12px; min-width: 0; max-width: 300px; font-size: 12px; }
+.account-user { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 185px; }
+.account-user strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-user .icon { width: 16px; height: 16px; flex-basis: 16px; color: var(--success); }
+.account-user>span { flex: 0 0 auto; }
+.account-link { display: inline-flex; align-items: center; justify-content: center; min-height: 39px; padding: 7px 12px; border: 1px solid var(--line); background: transparent; border-radius: 11px; color: var(--ink); font-size: 12px; }
+.account-link:hover { background: var(--soft); }
+.join-link { border-color: var(--ink); background: var(--ink); color: white; }
+.join-link:hover { background: #354f55; }
+.account-status { color: var(--muted); }
+.account-context { display: flex; align-items: flex-start; gap: 12px; padding: 17px 20px; border: 1px solid var(--line); border-radius: 17px; margin-bottom: 24px; background: #f0f2ec; }
+.account-context>.icon { margin-top: 4px; color: var(--success); }
+.account-context>div { min-width: 0; flex: 1; }
+.account-context strong { display: block; font-size: 14px; }
+.account-context p { margin: 3px 0 0; font-size: 12px; }
+.account-context>.text-button { align-self: center; white-space: nowrap; font-size: 12px; }
+.account-error { margin: 20px 0; }
+.account-error h2 { font-size: 21px; }
+.auth-layout { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 70px; max-width: 960px; margin: 0 auto; }
+.auth-card { padding: 30px; }
+.auth-tabs { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); border-bottom: 1px solid var(--line); margin: 0 0 28px; }
+.auth-tabs a { padding: 10px; text-align: center; color: var(--muted); font-size: 14px; font-weight: 700; }
+.auth-tabs a[aria-current] { color: var(--accent); box-shadow: 0 2px var(--accent); }
+.form-field { display: grid; gap: 8px; font-weight: 700; font-size: 14px; margin-bottom: 20px; }
+.form-field input { width: 100%; min-width: 0; min-height: 50px; border: 1px solid #cbd2cc; padding: 11px 14px; border-radius: 11px; background: #fff; color: var(--ink); font-size: 16px; font-weight: 400; }
+.form-field input:disabled { background: var(--soft); }
+.form-hint { font-size: 12px; line-height: 1.85; }
+.auth-card .inline-notice { font-size: 13px; }
+.auth-card [data-auth-submit] { width: 100%; margin-top: 8px; }
+.guest-link { margin-top: 24px; display: flex; justify-content: center; font-size: 13px; }
+.auth-benefits { padding-top: 28px; }
+.auth-benefits h2 { font-size: 31px; margin-bottom: 26px; }
+.auth-benefits>p { display: flex; align-items: center; gap: 11px; font-size: 14px; }
+.auth-benefits .guide-callout { margin-top: 26px; }
+.auth-benefits .guide-callout p { font-size: 13px; }
+.auth-already { display: flex; flex-wrap: wrap; gap: 14px; }
+.care-invite { display: flex; align-items: center; justify-content: space-between; gap: 25px; margin-top: 25px; background: #f0f3ed; }
+.care-invite>div { min-width: 0; }
+.care-invite h2 { font-size: 22px; margin-bottom: 7px; }
+.care-invite p { margin: 0; font-size: 13px; }
+.care-invite>.button { flex: 0 0 auto; }
+.care-summary { margin: 25px 0; }
+.care-summary h2 { font-size: 24px; margin: 5px 0 8px; }
+.care-summary>div>p { font-size: 14px; }
+.care-grade-summary { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 12px; margin-top: 24px; border-top: 1px solid var(--line); padding-top: 18px; }
+.care-grade-summary>span { color: var(--muted); font-size: 13px; }
+.care-grade-summary strong { display: block; font-size: 20px; margin-top: 6px; }
+.care-routine { margin: 25px 0; }
+.care-check-count { background: #e8eee6; border-radius: 50px; padding: 6px 13px; color: var(--success); font-weight: 700; font-size: 13px; white-space: nowrap; }
+.care-items { display: grid; gap: 12px; }
+.care-task { display: flex; align-items: flex-start; gap: 15px; padding: 22px; border: 1px solid var(--line); border-radius: 16px; cursor: pointer; transition: background .15s; }
+.care-task:hover { background: #f7f8f3; }
+.care-task.is-done { background: #f0f5ed; border-color: #bdcfb7; }
+.care-task input { flex: 0 0 22px; width: 22px; height: 22px; margin: 4px 0 0; accent-color: var(--success); }
+.care-task:has(input:disabled) { cursor: wait; }
+.care-task-copy { display: grid; gap: 6px; min-width: 0; color: var(--muted); font-size: 14px; }
+.care-task-copy strong { font-size: 18px; color: var(--ink); }
+.care-reason { font-size: 12px; color: var(--accent); }
+.care-routine>.save-note { margin: 20px 0 0; }
+.care-sources { padding-left: 20px; color: var(--muted); font-size: 13px; }
+.care-sources li { margin-bottom: 10px; }
+.care-sources a { text-decoration: underline; text-underline-offset: 4px; }
+@media(max-width:800px) {
+  .header-inner { padding-left: 24px; padding-right: 24px; }
+  .brand-copy strong { font-size: 19px; }
+  .account-menu { max-width: 240px; gap: 6px; }
+  .account-user { max-width: 150px; }
+  .auth-layout { gap: 35px; }
+  .auth-card { padding: 23px; }
+  .auth-benefits h2 { font-size: 27px; }
+  .care-invite { flex-direction: column; align-items: flex-start; gap: 18px; }
+}
+@media(max-width:600px) {
+  .header-inner { display: grid; grid-template-columns: minmax(0,1fr); padding: 13px 18px 0; gap: 8px; }
+  .brand { grid-column: 1; grid-row: 1; gap: 10px; max-width: none; }
+  .brand-copy { display: grid; gap: 1px; }
+  .brand-copy strong { font-size: 17px; line-height: 1.5; }
+  .brand-copy>span { display: none; }
+  .brand-mark { width: 37px; height: 37px; flex-basis: 37px; border-radius: 12px; }
+  .brand-mark svg { width: 31px; height: 31px; }
+  .account-menu { grid-column: 1; grid-row: 2; width: 100%; max-width: none; gap: 7px; }
+  .account-link { min-height: 34px; padding: 4px 10px; font-size: 11px; }
+  .account-user { max-width: 195px; font-size: 11px; }
+  .site-nav { grid-column: 1; grid-row: 3; display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); width: 100%; gap: 0; }
+  .site-nav a { min-height: 44px; padding: 8px 3px; font-size: 11px; gap: 4px; }
+  .site-nav .icon { display: none; }
+  .account-context { padding: 15px; flex-wrap: wrap; gap: 9px; }
+  .account-context>.text-button { margin-left: 30px; }
+  .auth-layout { grid-template-columns: minmax(0,1fr); gap: 24px; }
+  .auth-card { padding: 22px; }
+  .auth-benefits { padding: 12px 5px; }
+  .auth-benefits h2 { font-size: 26px; }
+  .auth-benefits h2 br { display: none; }
+  .care-summary, .care-routine { padding: 22px; }
+  .care-summary h2 { font-size: 22px; }
+  .care-grade-summary { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 15px; }
+  .care-grade-summary>span { font-size: 11px; }
+  .care-grade-summary strong { font-size: 18px; }
+  .care-routine .surface-heading { flex-wrap: wrap; gap: 14px; }
+  .care-routine h2 { font-size: 22px; }
+  .care-task { padding: 17px 14px; gap: 12px; }
+  .care-task-copy { font-size: 13px; }
+  .care-task-copy strong { font-size: 16px; }
+  .care-reason { font-size: 11px; }
+  .care-invite { padding: 22px; }
+  .care-invite h2 { font-size: 21px; }
+  .care-invite>.button { width: 100%; }
+}
+@media print { .account-context, .care-invite, .auth-tabs, .auth-benefits { display: none!important; } }
+
+/* Presence/absence is displayed separately from the three severity grades. */
+.grade-scale.binary-scale { grid-template-columns: repeat(2,minmax(0,1fr)); }
+.sebum-history-chart { margin-top: 26px; padding-top: 24px; border-top: 1px solid var(--line); }
+.sebum-history-chart h3 { margin-bottom: 7px; }
+.sebum-history-chart .chart-footnote { margin-bottom: 16px; }
+.sebum-presence-chart { min-height: 140px; }
+@media(max-width:600px) { .sebum-history-chart h3 { font-size: 17px; } }
+@media(max-width:600px) {
+  .metric[data-metric="flakes"] .grade-scale { grid-template-columns: minmax(0,1fr) max-content minmax(0,1fr); gap: 4px; }
+  .metric[data-metric="flakes"] .grade-scale span { font-size: 11px; white-space: nowrap; }
+}

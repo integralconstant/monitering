@@ -26,13 +26,15 @@ function icon(name) { return `<svg class="icon" viewBox="0 0 24 24" aria-hidden=
 $$('[data-icon]').forEach(el => { el.outerHTML = icon(el.dataset.icon); });
 const METRICS = [
   { id: 'flakes', name: '각질', icon: 'flakes', color: '#be7952', description: '두피 표면의 각질을 살펴봐요.' },
-  { id: 'sebum', name: '피지과다', icon: 'drop', color: '#567d79', description: '두피의 피지와 번들거림을 살펴봐요.' },
+  { id: 'sebum', name: '피지 유무', icon: 'drop', color: '#567d79', description: '사진에서 피지 관련 특징이 있는지 살펴봐요.' },
   { id: 'hair_loss', name: '탈모 여부', icon: 'hair', color: '#7772a2', description: '탈모 관련 특징을 살펴봐요.' },
   { id: 'erythema', name: '모낭사이홍반', icon: 'redness', color: '#b16c78', description: '모낭 사이 두피의 붉은 기를 살펴봐요.' }
 ];
 const SEVERITY_LABELS = ['정상', '경증', '중증'];
 const FLAKES_GRADE_LABELS = ['정상', '경중등도', '중증'];
 const FLAKES_PREPROCESSING_VERSION = 'flakes-384-square-v1';
+const SEBUM_PREPROCESSING_VERSION = 'sebum-384-attention-v1';
+const SEBUM_GRADE_LABELS = ['무', '유'];
 const CLASS_GRADE_MAP = {
   flakes: [0, 1, 1, 2],
   sebum: [0, 1, 2],
@@ -48,6 +50,9 @@ const state = {
   result: null, resultPhotos: [], savedId: null, error: '', uploadNote: '', checks: new Set(),
   range: 'month', year: Number(initialDate.slice(0, 4)), month: Number(initialDate.slice(5, 7)) - 1,
   selectedDate: initialDate, startedAt: null, historyInitialized: false,
+  user: null, authLoading: CAN_FETCH, authUnavailable: false, authBusy: false, authError: '', accountEpoch: 0,
+  accountRecords: [], recordsLoading: false, recordsError: '', saving: false, deleting: false, saveToken: null,
+  careChecks: new Set(), careDate: '', careLoading: false, careSaving: false, careError: '',
   health: { status: 'loading', message: '', models: [] }
 };
 function escapeHTML(value) { return String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char])); }
@@ -56,11 +61,21 @@ function validProbabilities(values, length) {
     && values.every(value => Number.isFinite(value) && value >= 0 && value <= 1)
     && Math.abs(values.reduce((sum, value) => sum + value, 0) - 1) < 0.01;
 }
-function gradeLabels(metric) { return metric?.id === 'flakes' ? FLAKES_GRADE_LABELS : SEVERITY_LABELS; }
+function isBinarySebum(metric) {
+  return metric?.id === 'sebum' && metric.preprocessing_version === SEBUM_PREPROCESSING_VERSION;
+}
+function metricName(metric) {
+  if (metric?.id === 'sebum') return isBinarySebum(metric) ? '피지 유무' : '피지과다';
+  return METRICS.find(definition => definition.id === metric?.id)?.name || '분석 항목';
+}
+function gradeMapping(metric) { return isBinarySebum(metric) ? [0, 1, 1] : CLASS_GRADE_MAP[metric?.id]; }
+function gradeLabels(metric) {
+  return isBinarySebum(metric) ? SEBUM_GRADE_LABELS : metric?.id === 'flakes' ? FLAKES_GRADE_LABELS : SEVERITY_LABELS;
+}
 function gradeProbabilities(metric) {
-  const mapping = CLASS_GRADE_MAP[metric?.id];
+  const mapping = gradeMapping(metric);
   if (!mapping || !validProbabilities(metric.probabilities, mapping.length)) return null;
-  const probabilities = [0, 0, 0];
+  const probabilities = gradeLabels(metric).map(() => 0);
   metric.probabilities.forEach((value, index) => { probabilities[mapping[index]] += value; });
   return probabilities;
 }
@@ -74,17 +89,21 @@ function metricLabel(metric) { const grade = metricGrade(metric); return grade =
 function validGradeMetadata(metric) {
   const fields = ['grade_probabilities', 'grade_labels', 'grade_confidence', 'grading_method', 'grade_indices', 'preprocessing_version'];
   if (!fields.some(field => field in metric)) return true; // Original records retain their raw values.
-  const probabilities = gradeProbabilities(metric), labels = gradeLabels(metric), grade = metricGrade(metric);
-  if (!probabilities || !validProbabilities(metric.grade_probabilities, 3)
-    || !Array.isArray(metric.grade_labels) || metric.grade_labels.length !== 3
+  const binary = isBinarySebum(metric);
+  if (metric.id === 'sebum' && metric.preprocessing_version != null && !binary) return false;
+  const probabilities = gradeProbabilities(metric), labels = gradeLabels(metric), mapping = gradeMapping(metric), grade = metricGrade(metric);
+  if (!probabilities || !validProbabilities(metric.grade_probabilities, labels.length)
+    || !Array.isArray(metric.grade_labels) || metric.grade_labels.length !== labels.length
     || !metric.grade_labels.every((label, index) => label === labels[index])
     || !metric.grade_probabilities.every((value, index) => Math.abs(value - probabilities[index]) < 0.00001)
     || metric.grade_index !== grade || metric.label !== labels[grade]
     || !Number.isFinite(metric.grade_confidence) || Math.abs(metric.grade_confidence - probabilities[grade]) >= 0.00001
-    || metric.grading_method !== (metric.id === 'flakes' ? 'probability_merge' : 'argmax')) return false;
+    || metric.grading_method !== (metric.id === 'flakes' || binary ? 'probability_merge' : 'argmax')) return false;
   if ('grade_indices' in metric && (!Array.isArray(metric.grade_indices)
-    || metric.grade_indices.length !== CLASS_GRADE_MAP[metric.id].length
-    || !metric.grade_indices.every((value, index) => value === CLASS_GRADE_MAP[metric.id][index]))) return false;
+    || metric.grade_indices.length !== mapping.length
+    || !metric.grade_indices.every((value, index) => value === mapping[index]))) return false;
+  if (binary && (!Array.isArray(metric.grade_indices) || metric.labels_confirmed !== true
+    || metric.settings_verified !== true || !Array.isArray(metric.excluded_classes) || metric.excluded_classes.length)) return false;
   return metric.id !== 'flakes' || (metric.preprocessing_version === FLAKES_PREPROCESSING_VERSION
     && Array.isArray(metric.excluded_classes) && metric.excluded_classes.length === 0);
 }
@@ -122,6 +141,8 @@ function validRecord(record) {
     && record.per_photo.every((photo, index) => photo && photo.index === index && validMetrics(photo.metrics));
 }
 function readRecords() {
+  if (state.authLoading || state.authUnavailable) return [];
+  if (state.user) return [...state.accountRecords].sort((a, b) => a.date.localeCompare(b.date));
   try {
     const records = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
     return Array.isArray(records) ? records.filter(validRecord).sort((a, b) => a.date.localeCompare(b.date)) : [];
@@ -160,16 +181,17 @@ function journey() {
   return `<nav class="journey" aria-label="분석 진행 단계"><ol>${names.map((name, i) => `<li class="${state.step === i + 1 ? 'is-current' : state.step > i + 1 ? 'is-complete' : ''}" ${state.step === i + 1 ? 'aria-current="step"' : ''}><button data-step="${i + 1}" ${state.working || i + 1 > state.maxStep || (i === 2 && !photoCount()) ? 'disabled' : ''}><span class="step-number">${state.step > i + 1 ? icon('check') : i + 1}</span><span>${name}</span></button></li>`).join('')}</ol></nav>`;
 }
 function serviceStatus() {
+  if (state.authUnavailable) return accountDataError('account');
   if (!CAN_FETCH) return `<div class="status-panel error server-notice"><strong>분석 페이지로 이동해 주세요.</strong><p>아래 주소에서 열면 사진을 분석할 수 있어요.</p><a class="button secondary" href="http://127.0.0.1:8000">분석 페이지 열기${icon('arrow')}</a><details class="help-details"><summary>페이지가 열리지 않나요?</summary><p>프로젝트 폴더의 <code>start.cmd</code>를 실행한 다음 다시 열어 주세요.</p></details></div>`;
   if (state.health.status === 'ready') return '';
   return `<div class="status-panel ${state.health.status}" role="status"><span class="status-indicator" aria-hidden="true"></span><div><strong>${state.health.status === 'loading' ? '분석할 준비를 하고 있어요' : '분석 서비스에 연결하지 못했어요'}</strong><p>${state.health.status === 'loading' ? '사진은 먼저 골라 두셔도 좋아요. 준비가 끝나면 분석 버튼이 활성화돼요.' : '선택한 사진은 그대로 유지돼요. 잠시 후 다시 연결해 주세요.'}</p>${state.health.status === 'error' ? button('다시 연결하기', 'health', true, 'arrow') : ''}${state.health.status === 'error' ? '<details class="help-details"><summary>계속 연결되지 않나요?</summary><p>실행 중인 분석 창을 확인해 주세요. 이 PC에서는 프로젝트 폴더의 start.cmd로 다시 실행할 수 있어요.</p></details>' : ''}</div></div>`;
 }
 function expectationNote() {
-  const verified = state.health.models?.find(model => model.id === 'flakes')?.settings_verified === true;
-  return `<div class="guide-callout"><strong>결과는 이렇게 확인해 주세요</strong><p>각질은 정상·경중등도·중증으로 표시해요. 경중등도는 경증과 중등도를 합친 등급이에요. 다른 항목은 정상·경증·중증으로 확인할 수 있어요.</p>${state.health.settings_verified === true ? '' : `<p class="metric-note">${verified ? '각질은 학습 코드의 처리 설정을 적용했어요. 다른 항목의 이미지 처리 설정은 확인 중이며, 결과는 관찰 참고용이에요.' : '분석 설정을 확인하고 있어요. 결과는 두피를 관찰하는 참고 자료로 봐 주세요.'}</p>`}</div>`;
+  const verified = ['flakes', 'sebum'].every(id => state.health.models?.find(model => model.id === id)?.settings_verified === true);
+  return `<div class="guide-callout"><strong>결과는 이렇게 확인해 주세요</strong><p>각질은 정상·경중등도·중증으로 표시해요. 경중등도는 경증과 중등도를 합친 등급이에요. 피지는 무·유로, 탈모 여부와 모낭사이홍반은 정상·경증·중증으로 확인할 수 있어요.</p>${state.health.settings_verified === true ? '' : `<p class="metric-note">${verified ? '각질과 피지는 제공된 모델 코드의 처리 설정을 적용했어요. 탈모 여부와 모낭사이홍반의 이미지 처리 설정은 확인 중이며, 결과는 관찰 참고용이에요.' : '분석 설정을 확인하고 있어요. 결과는 두피를 관찰하는 참고 자료로 봐 주세요.'}</p>`}</div>`;
 }
 function helper() {
-  return `<aside class="helper-card"><p class="section-kicker">한 장으로 시작해도 괜찮아요</p><h2 class="helper-title">어떤 부분을 살펴보나요?</h2><p>사진 한 장에서 네 가지 항목을 각각 살펴봐요.</p><div class="metric-preview">${METRICS.map(m => `<div class="metric-preview-item"><span class="metric-preview-icon">${icon(m.icon)}</span><div><strong>${m.name}</strong><p>${m.description}</p></div></div>`).join('')}</div><div class="helper-list"><p>${icon('check')} 사진 1장부터, 최대 3장까지</p><p>${icon('lock')} 사진은 분석에만 사용해요</p></div><a class="text-button" href="#care">촬영 방법 자세히 보기 ${icon('arrow')}</a></aside>`;
+  return `<aside class="helper-card"><p class="section-kicker">한 장으로 시작해도 괜찮아요</p><h2 class="helper-title">어떤 부분을 살펴보나요?</h2><p>사진 한 장에서 네 가지 항목을 각각 살펴봐요.</p><div class="metric-preview">${METRICS.map(m => `<div class="metric-preview-item"><span class="metric-preview-icon">${icon(m.icon)}</span><div><strong>${m.name}</strong><p>${m.description}</p></div></div>`).join('')}</div><div class="helper-list"><p>${icon('check')} 사진 1장부터, 최대 3장까지</p><p>${icon('lock')} 사진은 분석에만 사용해요</p></div><a class="text-button" href="#guide">촬영 방법 자세히 보기 ${icon('arrow')}</a></aside>`;
 }
 function preparation() {
   return `<section class="surface"><div class="surface-heading"><span class="section-number">01</span><div><p class="section-kicker">사진 준비하기</p><h2 data-step-title tabindex="-1">두피가 잘 보이는 사진이 있나요?</h2><p>처음이라도 괜찮아요. 아래 세 가지만 확인해 주세요.</p></div></div><div class="guide-preview"><div class="guide-visual">${guideDrawing()}<span>가르마 사이 두피가 보이도록 촬영해 주세요.</span></div><div class="photo-tips"><ol><li><span class="tip-number">1</span><div><strong>모발을 살짝 나눠 주세요</strong><p>머리카락보다 두피가 잘 보이게 준비해요.</p></div></li><li><span class="tip-number">2</span><div><strong>밝은 곳에서 초점을 맞춰요</strong><p>반사나 흔들림이 적은 사진을 골라 주세요.</p></div></li><li><span class="tip-number">3</span><div><strong>여러 장이면 같은 부위로</strong><p>추가 사진은 선택사항이에요. 한 장이면 시작할 수 있어요.</p></div></li></ol></div></div>${expectationNote()}<div class="flow-actions"><span class="privacy-note">${icon('photo')} 준비된 사진 1장만 있으면 돼요.</span>${button('사진 고르러 가기', 'next')}</div></section>`;
@@ -185,7 +207,7 @@ function selection() {
 }
 function review() {
   const photos = state.photos.filter(Boolean);
-  return `<section class="surface"><div class="surface-heading"><span class="section-number">03</span><div><p class="section-kicker">마지막으로 확인하기</p><h2 data-step-title tabindex="-1">이 사진으로 분석할까요?</h2><p>두피가 선명하게 보이는지 한 번 더 살펴봐 주세요.</p></div></div><div class="review-grid">${photos.map((photo, i) => `<figure class="review-item"><img src="${photo.url}" alt="분석할 사진 ${i + 1}"><figcaption>사진 ${i + 1}</figcaption></figure>`).join('')}</div><div class="photo-checklist"><strong>이렇게 보이면 준비 완료예요</strong><p>${icon('check')} 가르마 사이의 두피가 잘 보여요.</p><p>${icon('check')} 흔들림과 빛 반사가 적어요.</p>${photos.length > 1 ? `<p>${icon('check')} ${photos.length}장 모두 같은 두피 부위를 촬영했어요.</p>` : ''}</div>${expectationNote()}<p class="privacy-note">${icon('lock')} 분석 버튼을 누르면 사진을 분석 서비스로 보내요. 사진은 저장하지 않으며 결과만 내 기록에 남길 수 있어요.</p>${uploadFeedback()}${serviceStatus()}<div class="flow-actions">${button('사진 다시 고르기', 'back', true, 'back')}${button(state.error ? '같은 사진으로 다시 분석하기' : `사진 ${photos.length}장 분석하기`, 'analyze', false, 'spark', !photos.length || !!state.reading.size || state.health.status !== 'ready' || !CAN_FETCH)}</div></section>`;
+  return `<section class="surface"><div class="surface-heading"><span class="section-number">03</span><div><p class="section-kicker">마지막으로 확인하기</p><h2 data-step-title tabindex="-1">이 사진으로 분석할까요?</h2><p>두피가 선명하게 보이는지 한 번 더 살펴봐 주세요.</p></div></div><div class="review-grid">${photos.map((photo, i) => `<figure class="review-item"><img src="${photo.url}" alt="분석할 사진 ${i + 1}"><figcaption>사진 ${i + 1}</figcaption></figure>`).join('')}</div><div class="photo-checklist"><strong>이렇게 보이면 준비 완료예요</strong><p>${icon('check')} 가르마 사이의 두피가 잘 보여요.</p><p>${icon('check')} 흔들림과 빛 반사가 적어요.</p>${photos.length > 1 ? `<p>${icon('check')} ${photos.length}장 모두 같은 두피 부위를 촬영했어요.</p>` : ''}</div>${expectationNote()}<p class="privacy-note">${icon('lock')} 분석 버튼을 누르면 사진을 분석 서비스로 보내요. 사진은 저장하지 않으며 결과만 내 기록에 남길 수 있어요.</p>${uploadFeedback()}${serviceStatus()}<div class="flow-actions">${button('사진 다시 고르기', 'back', true, 'back')}${button(state.error ? '같은 사진으로 다시 분석하기' : `사진 ${photos.length}장 분석하기`, 'analyze', false, 'spark', !photos.length || !!state.reading.size || state.health.status !== 'ready' || state.authLoading || state.authUnavailable || !CAN_FETCH)}</div></section>`;
 }
 function loading() {
   return `<section class="surface loading-panel" aria-busy="true"><div class="loading-orbit" aria-hidden="true">${icon('spark')}</div><span class="section-kicker">조금만 기다려 주세요</span><h2 data-step-title tabindex="-1">사진을 꼼꼼히 살펴보고 있어요</h2><p role="status">사진을 전송하고 네 가지 항목을 분석하고 있어요.<br>분석이 끝나면 결과 화면으로 자동으로 이동해요.</p><div class="analysis-live"><span class="status-indicator" aria-hidden="true"></span>분석 진행 중 <span class="elapsed-label" data-elapsed></span></div><p class="privacy-note">사진 수와 기기 환경에 따라 시간이 조금 더 걸릴 수 있어요.<br>이 페이지를 열어 둔 채 잠시만 기다려 주세요.</p></section>`;
@@ -196,29 +218,37 @@ function analysis() {
 function metricCards(result) {
   return METRICS.map((definition, index) => {
     const metric = result.metrics[index];
-    const grade = metricGrade(metric);
-    return `<article class="metric ${grade === null ? 'grade-unknown' : `grade-${grade}`}" data-metric="${definition.id}"><div class="metric-header"><span class="metric-icon">${icon(definition.icon)}</span><h2>${definition.name}</h2></div><div class="metric-value">${escapeHTML(metricLabel(metric))}</div><div class="grade-scale" aria-label="${definition.name} ${escapeHTML(metricLabel(metric))}">${gradeLabels(metric).map((label, i) => `<span class="${grade === i ? 'is-active' : ''}" ${grade === i ? 'aria-current="true"' : ''}><i aria-hidden="true"></i>${label}</span>`).join('')}</div><p class="metric-description">${definition.description}</p></article>`;
+    const grade = metricGrade(metric), binary = isBinarySebum(metric), name = metricName(metric);
+    return `<article class="metric ${binary ? 'binary-metric ' : ''}${grade === null ? 'grade-unknown' : `grade-${grade}`}" data-metric="${definition.id}"><div class="metric-header"><span class="metric-icon">${icon(definition.icon)}</span><h2>${name}</h2></div><div class="metric-value">${escapeHTML(metricLabel(metric))}</div><div class="grade-scale ${binary ? 'binary-scale' : ''}" aria-label="${name} ${escapeHTML(metricLabel(metric))}">${gradeLabels(metric).map((label, i) => `<span class="${grade === i ? 'is-active' : ''}" ${grade === i ? 'aria-current="true"' : ''}><i aria-hidden="true"></i>${label}</span>`).join('')}</div><p class="metric-description">${binary ? '유는 피지 관련 특징이 있다는 판정이며, 심한 정도를 나타내는 등급은 아니에요.' : definition.id === 'sebum' ? '이전 모델의 정상·경증·중증 결과예요.' : definition.description}</p></article>`;
   }).join('');
 }
 function resultExplanation(result) {
-  const verified = result.metrics.find(metric => metric.id === 'flakes')?.settings_verified === true;
-  return `<section class="result-explanation"><div>${icon('leaf')}</div><div><h2>네 가지 항목을 등급으로 확인해요</h2><p>각질의 중간 등급인 경중등도는 경증과 중등도를 함께 나타내요. 다른 항목의 중간 등급은 경증이에요. 결과는 관찰 참고용이며 의료 진단을 대신하지 않아요.</p>${result.settings_verified ? '' : `<p class="metric-note">${verified ? '각질은 학습 코드 기준의 이미지 처리 설정으로 분석했어요. 다른 항목의 처리 설정은 확인 중이에요.' : '이 결과에는 아직 처리 설정을 확인하지 못한 항목이 있어요.'} 촬영 조건에 따라 결과가 달라질 수 있어요.</p>`}</div></section>`;
+  const binary = isBinarySebum(result.metrics.find(metric => metric.id === 'sebum'));
+  const verified = result.metrics.filter(metric => metric.settings_verified).map(metricName);
+  return `<section class="result-explanation"><div>${icon('leaf')}</div><div><h2>항목에 맞는 기준으로 결과를 확인해요</h2><p>각질의 중간 등급인 경중등도는 경증과 중등도를 함께 나타내요. ${binary ? '피지는 무·유로 확인하며, 유는 심각도를 뜻하지 않아요. 탈모 여부와 모낭사이홍반은 정상·경증·중증으로 표시해요.' : '피지과다·탈모 여부·모낭사이홍반은 이전 분석의 정상·경증·중증 등급으로 표시해요.'} 결과는 관찰 참고용이며 의료 진단을 대신하지 않아요.</p>${result.settings_verified ? '' : `<p class="metric-note">${verified.length ? `${verified.join('·')} 항목은 제공된 모델 코드의 처리 설정으로 분석했어요. 나머지 항목의 처리 설정은 확인 중이에요.` : '이 결과에는 아직 처리 설정을 확인하지 못한 항목이 있어요.'} 촬영 조건에 따라 결과가 달라질 수 있어요.</p>`}</div></section>`;
 }
 function usesLegacyFlakesPreprocessing(result) {
   const flakes = result?.metrics?.find(metric => metric.id === 'flakes');
   return Boolean(flakes && flakes.preprocessing_version !== FLAKES_PREPROCESSING_VERSION);
 }
+function usesLegacySebumModel(result) {
+  const sebum = result?.metrics?.find(metric => metric.id === 'sebum');
+  return Boolean(sebum && !isBinarySebum(sebum));
+}
 function legacyAnalysisNotice(result, compact = false) {
-  if (!usesLegacyFlakesPreprocessing(result)) return '';
-  return `<div class="inline-notice warning legacy-analysis-note" data-legacy-analysis><strong>이전 분석 설정의 기록</strong><p>${compact ? '각질 등급은 학습 코드 기준으로 다시 표시했어요. 현재 이미지 처리 설정을 적용하려면 원본 사진으로 다시 분석해 주세요.' : '각질 등급은 저장된 분석값을 학습 코드의 등급 규칙으로 다시 계산해 표시했어요. 사진을 다시 분석한 결과는 아니에요. 현재 이미지 처리 설정을 적용하려면 원본 사진으로 다시 분석해 주세요.'}</p></div>`;
+  const flakes = usesLegacyFlakesPreprocessing(result)
+    ? `<div class="inline-notice warning legacy-analysis-note" data-legacy-analysis><strong>이전 분석 설정의 기록</strong><p>${compact ? '각질 등급은 학습 코드 기준으로 다시 표시했어요. 현재 이미지 처리 설정을 적용하려면 원본 사진으로 다시 분석해 주세요.' : '각질 등급은 저장된 분석값을 학습 코드의 등급 규칙으로 다시 계산해 표시했어요. 사진을 다시 분석한 결과는 아니에요. 현재 이미지 처리 설정을 적용하려면 원본 사진으로 다시 분석해 주세요.'}</p></div>` : '';
+  const sebum = usesLegacySebumModel(result)
+    ? '<div class="inline-notice warning legacy-analysis-note" data-legacy-sebum><strong>이전 피지 모델의 기록</strong><p>당시의 정상·경증·중증 결과를 그대로 보여줘요. 새 모델의 유·무 판정을 확인하려면 원본 사진으로 다시 분석해 주세요.</p></div>' : '';
+  return flakes + sebum;
 }
 function analysisDetails(result) {
-  return `<details class="details-panel" data-details="analysis"><summary><span>사진별 등급 자세히 보기</span><span>사진마다 어떤 결과가 나왔는지 확인해요</span></summary><div class="details-content"><section class="photo-results"><h3>사진별 분석 등급</h3><div class="table-scroll" tabindex="0" role="region" aria-label="사진별 분석 등급 표"><table><thead><tr><th scope="col">사진</th>${METRICS.map(m => `<th scope="col">${m.name}</th>`).join('')}</tr></thead><tbody>${result.per_photo.map((photo, index) => `<tr><th scope="row">${state.resultPhotos[index] ? `<img class="result-thumbnail" src="${state.resultPhotos[index]}" alt="분석한 사진 ${index + 1}">` : ''}<span>사진 ${index + 1}</span></th>${photo.metrics.map(m => `<td><strong class="grade-text grade-${metricGrade(m) ?? 'unknown'}">${escapeHTML(metricLabel(m))}</strong></td>`).join('')}</tr>`).join('')}</tbody></table></div><p class="metric-note">각질은 경증과 중등도의 분석값을 먼저 합쳐 경중등도 등급을 선택해요. 여러 장이면 사진별 분석값을 평균한 결과로 최종 등급을 정해요.</p></section></div></details>`;
+  return `<details class="details-panel" data-details="analysis"><summary><span>사진별 등급 자세히 보기</span><span>사진마다 어떤 결과가 나왔는지 확인해요</span></summary><div class="details-content"><section class="photo-results"><h3>사진별 분석 등급</h3><div class="table-scroll" tabindex="0" role="region" aria-label="사진별 분석 등급 표"><table><thead><tr><th scope="col">사진</th>${result.metrics.map(m => `<th scope="col">${metricName(m)}</th>`).join('')}</tr></thead><tbody>${result.per_photo.map((photo, index) => `<tr><th scope="row">${state.resultPhotos[index] ? `<img class="result-thumbnail" src="${state.resultPhotos[index]}" alt="분석한 사진 ${index + 1}">` : ''}<span>사진 ${index + 1}</span></th>${photo.metrics.map(m => `<td><strong class="grade-text grade-${metricGrade(m) ?? 'unknown'}">${escapeHTML(metricLabel(m))}</strong></td>`).join('')}</tr>`).join('')}</tbody></table></div><p class="metric-note">각질은 경증과 중등도의 분석값을 먼저 합쳐 경중등도 등급을 선택해요. ${isBinarySebum(result.metrics[1]) ? ' 피지는 경증 이상 분석값을 합쳐 무·유를 판정해요.' : ''} 여러 장이면 사진별 분석값을 평균한 결과로 최종 판정을 정해요.</p></section></div></details>`;
 }
 function report() {
   const result = state.result;
   if (!result) return `${intro('분석 결과', '아직 분석한 사진이 없어요.', '사진 한 장을 준비하면 네 가지 항목을 살펴볼 수 있어요.')}${emptyState('첫 기록을 시작해 볼까요?', '사진 준비부터 하나씩 안내해 드릴게요. 이전 결과는 내 기록에서 다시 볼 수 있어요.')}`;
-  return `${intro(state.savedId ? '저장한 두피 기록' : '사진 분석 완료', '오늘의 두피 기록이 준비됐어요.', '네 가지 항목을 살펴보고, 결과를 저장해 다음 기록과 함께 보세요.')}<section class="report-overview"><div class="result-meta">${icon('calendar')} ${shortDate(result.date)}<span>사진 ${result.photo_count}장 분석</span></div><span class="result-tag">${state.savedId ? '저장된 기록' : '새로운 기록'}</span></section>${resultExplanation(result)}${legacyAnalysisNotice(result)}<section class="metrics" aria-label="네 가지 분석 결과">${metricCards(result)}</section><section class="surface next-step"><div><span class="section-kicker">이 결과를 다음에도 보고 싶다면</span><h2>${state.savedId ? '내 기록에 잘 보관했어요' : '오늘의 결과를 기록해 두세요'}</h2><p>${state.savedId ? '같은 브라우저의 내 기록에서 언제든 다시 볼 수 있어요.' : '이 브라우저에 결과만 저장해요. 사진은 저장하지 않아요.'}</p></div>${state.savedId ? '<a class="button" href="#history">내 기록 보러 가기' + icon('arrow') + '</a>' : button('오늘의 결과 저장하기', 'save', false, 'save')}</section>${analysisDetails(result)}<div class="bottom-actions">${button('결과 인쇄하기', 'print', true, 'report')}${button('다른 사진 분석하기', 'new', true, 'photo')}</div>`;
+  return `${intro(state.savedId ? '저장한 두피 기록' : '사진 분석 완료', '오늘의 두피 기록이 준비됐어요.', '네 가지 항목을 살펴보고, 결과를 저장해 다음 기록과 함께 보세요.')}<section class="report-overview"><div class="result-meta">${icon('calendar')} ${shortDate(result.date)}<span>사진 ${result.photo_count}장 분석</span></div><span class="result-tag">${state.savedId ? '저장된 기록' : '새로운 기록'}</span></section>${resultExplanation(result)}${legacyAnalysisNotice(result)}<section class="metrics" aria-label="네 가지 분석 결과">${metricCards(result)}</section><section class="surface next-step"><div><span class="section-kicker">이 결과를 다음에도 보고 싶다면</span><h2>${state.savedId ? '내 기록에 잘 보관했어요' : '오늘의 결과를 기록해 두세요'}</h2><p>${state.savedId ? state.user ? '이 계정의 내 기록에서 언제든 다시 볼 수 있어요.' : '같은 브라우저의 내 기록에서 언제든 다시 볼 수 있어요.' : recordStorageCopy()}</p></div>${state.savedId ? '<a class="button" href="#history">내 기록 보러 가기' + icon('arrow') + '</a>' : button(state.saving ? '기록을 저장하고 있어요' : '오늘의 결과 저장하기', 'save', false, 'save', state.saving || state.authLoading || state.authUnavailable)}</section>${analysisDetails(result)}<section class="surface care-invite"><div><span class="section-kicker">오늘의 결과로 시작하는 관리</span><h2>내 두피에 맞는 습관을 살펴볼까요?</h2><p>분석한 항목에 맞춰 오늘 실천할 관리 방법을 모았어요.</p></div><a class="button secondary" href="#care">맞춤 관리 보기${icon('leaf')}</a></section><div class="bottom-actions">${button('결과 인쇄하기', 'print', true, 'report')}${button('다른 사진 분석하기', 'new', true, 'photo')}</div>`;
 }
 function graphRecords(range) {
   const records = readRecords();
@@ -228,7 +258,12 @@ function graphRecords(range) {
   const from = anchor.toISOString().slice(0, 10);
   return records.filter(r => r.configuration_id === configuration && (range === 'week' ? r.date >= from && r.date <= today() : r.date.startsWith(month)));
 }
-function legend() { return `<div class="chart-legend">${METRICS.map(m => `<span><i style="background:${m.color}"></i>${m.name}</span>`).join('')}</div>`; }
+function legend(range = state.range) {
+  const records = graphRecords(range);
+  if (!records.length) return '';
+  const binary = records.some(record => isBinarySebum(record.metrics[1]));
+  return `<div class="chart-legend">${METRICS.filter(m => !(binary && m.id === 'sebum')).map(m => `<span><i style="background:${m.color}"></i>${metricName(records[0].metrics.find(metric => metric.id === m.id))}</span>`).join('')}</div>`;
+}
 function lineChart(range) {
   const records = graphRecords(range);
   if (!records.length) return '<p class="chart-empty">선택한 기간에 비교할 수 있는 기록이 없어요. 다른 달이나 최근 1주를 선택해 보세요.</p>';
@@ -241,17 +276,29 @@ function lineChart(range) {
     let segment = [];
     const circles = [];
     points.forEach(p => {
-      const grade = metricGrade(p.record.metrics[i]);
+      const metric = p.record.metrics[i];
+      const grade = isBinarySebum(metric) ? null : metricGrade(metric);
       if (grade === null) { if (segment.length) segments.push(segment); segment = []; return; }
       const y = 140 - grade * 55;
       segment.push(`${p.x},${y}`);
-      circles.push(`<circle cx="${p.x}" cy="${y}" r="4" fill="white" stroke="${m.color}" stroke-width="2"><title>${p.record.date} ${m.name} ${escapeHTML(metricLabel(p.record.metrics[i]))}</title></circle>`);
+      circles.push(`<circle cx="${p.x}" cy="${y}" r="4" fill="white" stroke="${m.color}" stroke-width="2"><title>${p.record.date} ${metricName(p.record.metrics[i])} ${escapeHTML(metricLabel(p.record.metrics[i]))}</title></circle>`);
     });
     if (segment.length) segments.push(segment);
     return segments.filter(values => values.length > 1).map(values => `<polyline points="${values.join(' ')}" stroke="${m.color}" stroke-width="2" fill="none"/>`).join('') + circles.join('');
   }).join('');
   const labels = days.filter((_, i) => !i || i === days.length - 1 || i % Math.ceil(days.length / 5) === 0);
-  return `<svg class="chart" viewBox="0 0 520 180" role="img" aria-label="기록별 정상, 중간 등급, 중증 분석 등급 그래프"><path d="M64 30H495M64 85H495M64 140H495" stroke="#dddeda" stroke-dasharray="3 4" fill="none"/><text x="55" y="34" text-anchor="end">중증</text><text x="55" y="89" text-anchor="end">중간 등급</text><text x="55" y="144" text-anchor="end">정상</text>${lines}${labels.map(d => `<text x="${xFor(d)}" y="169" text-anchor="middle">${d.slice(5).replace('-', '.')}</text>`).join('')}</svg>`;
+  return `<svg class="chart" data-severity-chart viewBox="0 0 520 180" role="img" aria-label="기록별 정상, 중간 등급, 중증 분석 등급 그래프"><path d="M64 30H495M64 85H495M64 140H495" stroke="#dddeda" stroke-dasharray="3 4" fill="none"/><text x="55" y="34" text-anchor="end">중증</text><text x="55" y="89" text-anchor="end">중간 등급</text><text x="55" y="144" text-anchor="end">정상</text>${lines}${labels.map(d => `<text x="${xFor(d)}" y="169" text-anchor="middle">${d.slice(5).replace('-', '.')}</text>`).join('')}</svg>`;
+}
+function sebumPresenceChart(range) {
+  const records = graphRecords(range).filter(record => isBinarySebum(record.metrics[1]));
+  if (!records.length) return '';
+  const days = [...new Set(records.map(record => record.date))];
+  const start = Date.parse(`${days[0]}T00:00:00Z`), span = Date.parse(`${days.at(-1)}T00:00:00Z`) - start;
+  const xFor = date => span ? 65 + (Date.parse(`${date}T00:00:00Z`) - start) / span * 415 : 270;
+  const points = records.map(record => ({ record, grade: metricGrade(record.metrics[1]), x: xFor(record.date) })).filter(point => point.grade !== null);
+  const color = METRICS[1].color;
+  const labels = days.filter((_, index) => !index || index === days.length - 1 || index % Math.ceil(days.length / 5) === 0);
+  return `<section class="sebum-history-chart"><h3>피지 유무의 변화</h3><p class="chart-footnote">피지 유무는 별도의 두 단계로 비교해요. 유는 심한 정도를 나타내는 등급이 아니에요.</p><svg class="chart sebum-presence-chart" data-sebum-chart viewBox="0 0 520 160" role="img" aria-label="피지 유무 기록 그래프"><path d="M64 40H495M64 110H495" stroke="#dddeda" stroke-dasharray="3 4" fill="none"/><text x="55" y="44" text-anchor="end">유</text><text x="55" y="114" text-anchor="end">무</text>${points.length > 1 ? `<polyline points="${points.map(point => `${point.x},${110 - point.grade * 70}`).join(' ')}" stroke="${color}" stroke-width="2" fill="none"/>` : ''}${points.map(point => `<circle cx="${point.x}" cy="${110 - point.grade * 70}" r="4" fill="white" stroke="${color}" stroke-width="2"><title>${point.record.date} 피지 ${escapeHTML(metricLabel(point.record.metrics[1]))}</title></circle>`).join('')}${labels.map(date => `<text x="${xFor(date)}" y="144" text-anchor="middle">${date.slice(5).replace('-', '.')}</text>`).join('')}</svg></section>`;
 }
 function calendar() {
   const first = new Date(state.year, state.month, 1).getDay(), days = new Date(state.year, state.month + 1, 0).getDate();
@@ -265,10 +312,13 @@ function history() {
   }
   const selected = records.filter(r => r.date === state.selectedDate);
   const header = intro('차곡차곡 쌓이는 나의 기록', '다시 보고 싶은 순간을 모았어요.', '날짜를 선택하면 그날 저장한 결과를 다시 볼 수 있어요.');
-  if (!records.length) return `${header}${emptyState('아직 저장한 기록이 없어요', '사진 분석을 마친 뒤 ‘오늘의 결과 저장하기’를 눌러 주세요. 이 브라우저에서 다시 볼 수 있어요.')}`;
-  return `${header}<div class="history-stats"><div class="stat-item"><span>저장한 기록</span><strong>${records.length}<small>회</small></strong></div><div class="stat-item"><span>살펴본 사진</span><strong>${records.reduce((sum, r) => sum + r.photo_count, 0)}<small>장</small></strong></div><div class="stat-item"><span>가장 최근 기록</span><strong>${records.at(-1).date.slice(5).replace('-', '.')}</strong></div></div><div class="history-layout"><section class="surface">${calendar()}</section><section class="surface history-list"><div class="surface-heading"><div><p class="section-kicker">선택한 날짜</p><h2>${shortDate(state.selectedDate)}</h2></div></div>${selected.map(r => `<article class="history-record"><div class="record-date"><strong>두피 사진 분석</strong><span>사진 ${r.photo_count}장</span></div>${legacyAnalysisNotice(r, true)}<div class="record-metrics">${r.metrics.map((m, i) => `<span>${METRICS[i].name}<strong>${escapeHTML(metricLabel(m))}</strong></span>`).join('')}</div><div class="record-actions"><button class="button secondary" data-record="${escapeHTML(r.id)}">결과 다시 보기${icon('arrow')}</button></div></article>`).join('') || '<div class="empty-state"><h3>이날은 저장한 기록이 없어요</h3><p>달력에서 점이 표시된 날짜를 선택해 주세요.</p></div>'}</section></div><details class="details-panel" data-details="history-chart"><summary><span>분석 등급의 변화 살펴보기</span><span>저장한 결과를 세 단계로 비교해요</span></summary><div class="details-content"><p class="chart-footnote">같은 분석 설정으로 저장한 기록의 등급을 비교해요. 각질의 중간 등급은 경중등도(경증+중등도), 다른 항목의 중간 등급은 경증이에요. 촬영 조건이 다르면 결과가 달라질 수 있으므로, 그래프만으로 호전·악화를 단정하지 마세요.</p><div class="tabs" aria-label="그래프 기간"><button data-range="week" class="${state.range === 'week' ? 'selected' : ''}" aria-pressed="${state.range === 'week'}">최근 1주</button><button data-range="month" class="${state.range === 'month' ? 'selected' : ''}" aria-pressed="${state.range === 'month'}">선택한 달</button></div>${legend()}${lineChart(state.range)}</div></details><div class="bottom-actions"><p class="save-note">이 브라우저에 결과만 보관해요. 사진은 저장하지 않아요.</p><button class="text-button" data-action="clear-records">저장한 기록 모두 삭제</button></div>`;
+  if (state.authLoading || state.recordsLoading) return `${header}<section class="surface empty-state" role="status"><h2>내 기록을 불러오고 있어요</h2></section>`;
+  if (state.authUnavailable) return `${header}${accountDataError('account')}`;
+  if (state.user && state.recordsError) return `${header}${accountDataError('records')}`;
+  if (!records.length) return `${header}${accountContext()}${emptyState('아직 저장한 기록이 없어요', '사진 분석을 마친 뒤 ‘오늘의 결과 저장하기’를 눌러 주세요. 내 기록에서 다시 볼 수 있어요.')}`;
+  return `${header}${accountContext()}<div class="history-stats"><div class="stat-item"><span>저장한 기록</span><strong>${records.length}<small>회</small></strong></div><div class="stat-item"><span>살펴본 사진</span><strong>${records.reduce((sum, r) => sum + r.photo_count, 0)}<small>장</small></strong></div><div class="stat-item"><span>가장 최근 기록</span><strong>${records.at(-1).date.slice(5).replace('-', '.')}</strong></div></div><div class="history-layout"><section class="surface">${calendar()}</section><section class="surface history-list"><div class="surface-heading"><div><p class="section-kicker">선택한 날짜</p><h2>${shortDate(state.selectedDate)}</h2></div></div>${selected.map(r => `<article class="history-record"><div class="record-date"><strong>두피 사진 분석</strong><span>사진 ${r.photo_count}장</span></div>${legacyAnalysisNotice(r, true)}<div class="record-metrics">${r.metrics.map((m, i) => `<span>${metricName(m)}<strong>${escapeHTML(metricLabel(m))}</strong></span>`).join('')}</div><div class="record-actions"><button class="button secondary" data-record="${escapeHTML(r.id)}">결과 다시 보기${icon('arrow')}</button></div></article>`).join('') || '<div class="empty-state"><h3>이날은 저장한 기록이 없어요</h3><p>달력에서 점이 표시된 날짜를 선택해 주세요.</p></div>'}</section></div><details class="details-panel" data-details="history-chart"><summary><span>분석 등급의 변화 살펴보기</span><span>항목에 맞는 판정 기준으로 비교해요</span></summary><div class="details-content"><p class="chart-footnote">같은 분석 설정으로 저장한 기록의 등급을 비교해요. 각질의 중간 등급은 경중등도(경증+중등도), 탈모 여부·모낭사이홍반의 중간 등급은 경증이에요. 새 피지 모델의 무·유는 별도 그래프로 보여줘요. 촬영 조건이 다르면 결과가 달라질 수 있으므로, 그래프만으로 호전·악화를 단정하지 마세요.</p><div class="tabs" aria-label="그래프 기간"><button data-range="week" class="${state.range === 'week' ? 'selected' : ''}" aria-pressed="${state.range === 'week'}">최근 1주</button><button data-range="month" class="${state.range === 'month' ? 'selected' : ''}" aria-pressed="${state.range === 'month'}">선택한 달</button></div>${legend()}${lineChart(state.range)}${sebumPresenceChart(state.range)}</div></details><div class="bottom-actions"><p class="save-note">${recordStorageCopy()}</p><button class="text-button" data-action="clear-records" ${state.deleting ? 'disabled' : ''}>${state.deleting ? '기록을 삭제하고 있어요' : '저장한 기록 모두 삭제'}</button></div>`;
 }
-function care() {
+function guide() {
   const tips = [
     ['두피가 보이도록', '가르마를 살짝 나눠 주세요', '머리카락만 가득한 사진보다 모발 사이 두피가 잘 드러나는 사진을 준비해요.', 'hair'],
     ['선명하게 보이도록', '밝기와 초점을 확인해요', '조명이 너무 어둡거나 빛이 반사되지 않는지 살펴봐 주세요. 흔들렸다면 다시 촬영해요.', 'scan'],
@@ -277,12 +327,193 @@ function care() {
   return `${intro('사진 한 장을 위한 작은 도움', '이렇게 찍으면 준비 끝이에요.', '어렵게 생각하지 마세요. 두피가 선명하게 보이는 사진이면 좋아요.')}<div class="guide-cards">${tips.map((t, i) => `<article class="surface guide-card"><div class="guide-example">${icon(t[3])}<span class="guide-number">0${i + 1}</span></div><p class="section-kicker">${t[0]}</p><h2>${t[1]}</h2><p>${t[2]}</p></article>`).join('')}</div><section class="surface care-checklist"><div class="surface-heading"><div><p class="section-kicker">촬영 전 마지막 확인</p><h2>하나씩 확인해 볼까요?</h2></div><span class="check-count">${state.checks.size} / 3 확인</span></div>${['두피가 잘 보이도록 모발을 나눴어요.', '흔들림과 빛 반사 없이 선명하게 보여요.', '여러 장이면 같은 부위를 촬영했어요.'].map((text, i) => `<label class="task"><input type="checkbox" data-check="${i}" ${state.checks.has(i) ? 'checked' : ''}><span>${text}</span></label>`).join('')}<div class="flow-actions"><p class="save-note">확인 표시는 이 페이지를 사용하는 동안 유지돼요.</p>${button('준비한 사진 고르기', 'start')}</div></section>`;
 }
 function about() {
-  return `${intro('서비스 소개', '사진에서 시작하는 두피 기록.', '딥러닝 기반 ai 두피 관리 서비스')}<section class="surface about-hero"><h2>내 두피를 살펴보는 시간을<br>조금 더 쉽게 만들고 싶었어요.</h2><p>사진 한 장으로 각질, 피지과다, 탈모 여부, 모낭사이홍반의 네 가지 항목을 살펴보고 결과를 기록하는 서비스예요.</p><p>각질은 학습 코드에 맞춰 정상·경중등도·중증으로 정리해요. 경중등도는 경증과 중등도를 합친 등급이에요. 다른 항목은 정상·경증·중증으로 표시하며, 이미지 처리 설정을 확인 중이에요. 결과는 관찰 참고용으로 제공해요.</p><div class="about-credits"><div><span>만든 곳</span><strong>대림대학교 · 지공모</strong></div><div><span>팀원</span><strong>연일 · 이승철 · 김진형</strong></div><div><span>지도교수</span><strong>김영실 · 박상윤</strong></div></div></section>`;
+  return `${intro('서비스 소개', '사진에서 시작하는 두피 기록.', '딥러닝 기반 AI 두피 관리 서비스')}<section class="surface about-hero"><h2>내 두피를 살펴보는 시간을<br>조금 더 쉽게 만들고 싶었어요.</h2><p>사진 한 장으로 각질, 피지 유무, 탈모 여부, 모낭사이홍반의 네 가지 항목을 살펴보고 결과를 기록하는 서비스예요.</p><p>각질은 학습 코드에 맞춰 정상·경중등도·중증으로 정리해요. 경중등도는 경증과 중등도를 합친 등급이에요. 피지는 무·유로 표시하며 경증 이상 분석값을 합쳐 유무를 판정해요. 탈모 여부와 모낭사이홍반은 정상·경증·중증으로 표시하며, 이미지 처리 설정을 확인 중이에요. 결과는 관찰 참고용으로 제공해요.</p><div class="about-credits"><div><span>만든 곳</span><strong>대림대학교 · 지공모</strong></div><div><span>팀원</span><strong>연일 · 이승철 · 김진형</strong></div><div><span>지도교수</span><strong>김영실 · 박상윤</strong></div></div></section>`;
 }
-function currentPage() { const route = location.hash.slice(1) || 'analysis'; return ['analysis', 'report', 'history', 'care', 'about'].includes(route) ? route : 'analysis'; }
+
+function recordStorageCopy() {
+  return state.user ? '결과는 로그인한 계정에 저장해요. 사진은 저장하지 않아요.' : '게스트 결과는 이 브라우저에만 저장해요. 사진은 저장하지 않아요.';
+}
+function accountContext() {
+  return `<div class="account-context">${icon(state.user ? 'lock' : 'photo')}<div><strong>${state.user ? `${escapeHTML(state.user.nickname)}님의 개인 기록` : '게스트로 살펴보고 있어요'}</strong><p>${recordStorageCopy()}${state.user ? '' : ' 로그인하면 계정별로 결과와 오늘의 관리 실천을 보관할 수 있어요.'}</p></div>${state.user ? '' : '<a class="text-button" href="#login">로그인하기</a>'}</div>`;
+}
+function accountDataError(scope) {
+  const message = scope === 'records' ? state.recordsError : scope === 'care' ? state.careError : '로그인 상태를 확인하지 못했어요. 다시 연결해 주세요.';
+  const action = scope === 'records' ? 'reload-records' : scope === 'care' ? 'reload-care' : 'retry-account';
+  return `<section class="surface account-error" role="alert"><h2>잠시 연결을 확인해 주세요</h2><p>${escapeHTML(message)}</p>${button('다시 불러오기', action, true)}</section>`;
+}
+function renderAccountMenu() {
+  const menu = $('#account-menu');
+  if (!menu) return;
+  if (state.authLoading) { menu.innerHTML = '<span class="account-status" role="status">계정 확인 중</span>'; return; }
+  if (state.authUnavailable) { menu.innerHTML = '<button class="text-button" data-action="retry-account">계정 다시 연결</button>'; return; }
+  const busy = state.authBusy || state.working || state.saving || state.deleting || state.careSaving || !!state.reading.size;
+  menu.innerHTML = state.user
+    ? `<span class="account-user">${icon('lock')}<strong data-account-name>${escapeHTML(state.user.nickname)}</strong><span>님</span></span><button class="account-link" data-action="logout" ${busy ? 'disabled' : ''}>${state.authBusy ? '로그아웃 중' : '로그아웃'}</button>`
+    : '<a class="account-link" href="#login">로그인</a><a class="account-link join-link" href="#register">시연 계정 만들기</a>';
+}
+function authPage(mode) {
+  if (state.user) return `${intro('나의 계정', `${escapeHTML(state.user.nickname)}님, 반가워요.`, '분석 결과와 오늘의 관리를 계정에 모아 보세요.')}<section class="surface auth-already"><a class="button" href="#history">내 기록 보기${icon('arrow')}</a><a class="button secondary" href="#care">맞춤 관리 보기${icon('leaf')}</a></section>`;
+  const signup = mode === 'register';
+  const busy = state.authLoading || state.authBusy || state.working || !!state.reading.size || state.saving || state.deleting || state.careSaving;
+  return `${intro('대회용 로컬 시연 계정', signup ? '나만의 두피 기록을 시작해요.' : '다시 만나 반가워요.', signup ? '닉네임과 시연용 비밀번호만 있으면 돼요.' : '만들어 둔 닉네임과 시연용 비밀번호를 입력해 주세요.')}<div class="auth-layout"><section class="surface auth-card"><div class="auth-tabs"><a href="#login" ${!signup ? 'aria-current="page"' : ''}>로그인</a><a href="#register" ${signup ? 'aria-current="page"' : ''}>계정 만들기</a></div><form data-auth-form="${mode}" aria-busy="${busy}"><label class="form-field" for="auth-nickname"><span>닉네임</span><input id="auth-nickname" name="nickname" type="text" maxlength="40" autocomplete="username" required ${busy ? 'disabled' : ''} placeholder="예: 두피관찰자"></label><label class="form-field" for="auth-password"><span>시연용 비밀번호</span><input id="auth-password" name="password" type="password" maxlength="128" autocomplete="${signup ? 'new-password' : 'current-password'}" required aria-describedby="demo-password-help" ${busy ? 'disabled' : ''}></label><p class="form-hint" id="demo-password-help">시연 전용 비밀번호(예: 246810)를 만들어 주세요. 실제 비밀번호나 생년월일은 입력하지 마세요.</p><p class="inline-notice error" id="auth-error" role="alert" ${state.authError ? '' : 'hidden'}>${escapeHTML(state.authError)}</p>${state.working ? '<p class="form-hint">사진 분석이 끝나면 계정을 변경할 수 있어요.</p>' : ''}<button class="button" data-auth-submit type="submit" ${busy || state.authUnavailable || !CAN_FETCH ? 'disabled' : ''}>${state.authBusy ? '잠시만 기다려 주세요' : signup ? '시연 계정 만들기' : '로그인하기'}${icon('arrow')}</button></form>${state.authUnavailable ? accountDataError('account') : ''}<a class="text-button guest-link" href="#analysis">게스트로 사진 분석하기 ${icon('arrow')}</a></section><aside class="auth-benefits"><span class="section-kicker">나를 위한 작은 기록장</span><h2>사진 한 장에서<br>매일의 관리까지</h2><p>${icon('calendar')} 내 계정에 분석 결과를 모아요.</p><p>${icon('leaf')} 결과에 맞는 관리 습관을 살펴봐요.</p><p>${icon('check')} 오늘 실천한 관리를 체크해요.</p><div class="guide-callout"><strong>이 PC에서 사용하는 시연 서비스예요</strong><p>계정과 기록은 이 PC에 보관돼요. 게스트로 남긴 기존 기록은 로그인해도 그대로 보존되며, 계정 기록과 따로 보여요.</p></div></aside></div>`;
+}
+function validUser(user) { return user && Number.isInteger(user.id) && user.id > 0 && typeof user.nickname === 'string' && user.nickname.length <= 40; }
+async function jsonRequest(url, options = {}) {
+  const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 12000);
+  const { body, ...rest } = options;
+  try {
+    const response = await fetch(url, { ...rest, signal: controller.signal, credentials: 'same-origin', cache: 'no-store',
+      headers: { ...(rest.headers || {}), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+    let data; try { data = await response.json(); } catch { throw new Error('응답을 확인하지 못했어요. 잠시 후 다시 시도해 주세요.'); }
+    if (!response.ok) { const error = new Error(typeof data.error === 'string' ? data.error : '요청을 마치지 못했어요. 다시 시도해 주세요.'); error.status = response.status; error.code = data.code; throw error; }
+    return data;
+  } catch (error) {
+    if (error.name === 'AbortError' || error.name === 'TypeError') throw new Error('연결을 확인하지 못했어요. 잠시 후 다시 시도해 주세요.');
+    throw error;
+  } finally { clearTimeout(timeout); }
+}
+function resetAccountScope() {
+  state.accountEpoch++;
+  state.photos.forEach((_, index) => releasePhoto(index)); state.reading.clear(); invalidateResult();
+  state.accountRecords = []; state.recordsLoading = false; state.recordsError = ''; state.historyInitialized = false;
+  state.careChecks = new Set(); state.careDate = ''; state.careLoading = false; state.careSaving = false; state.careError = '';
+  state.checks = new Set(); state.step = 1; state.maxStep = 2; state.error = ''; state.uploadNote = '';
+  state.saving = false; state.deleting = false;
+  state.selectedDate = today(); state.year = Number(state.selectedDate.slice(0, 4)); state.month = Number(state.selectedDate.slice(5, 7)) - 1;
+}
+function expireSession() {
+  resetAccountScope(); state.user = null; state.authLoading = false; state.authUnavailable = false; state.authBusy = false;
+  state.authError = '로그인이 만료됐어요. 다시 로그인해 주세요.'; go('login'); toast(state.authError);
+}
+async function refreshChangedAccount() {
+  resetAccountScope(); state.user = null; state.working = false; state.authBusy = false; state.authLoading = true;
+  go('analysis'); await bootstrapAccount(); toast('사용 중인 계정이 바뀌었어요. 현재 계정으로 다시 확인해 주세요.');
+}
+async function accountRequest(url, options = {}) {
+  try { return await jsonRequest(url, { ...options, headers: { ...(options.headers || {}), 'X-Scalp-Account': state.user ? String(state.user.id) : 'guest' } }); }
+  catch (error) {
+    if (error.status === 409 && error.code === 'account_changed') await refreshChangedAccount();
+    else if (error.status === 401 && state.user) expireSession();
+    throw error;
+  }
+}
+async function bootstrapAccount() {
+  if (!CAN_FETCH) { state.authLoading = false; state.authUnavailable = false; render(); return; }
+  if (state.authBusy || state.working || state.saving || state.deleting || state.careSaving) return;
+  const epoch = state.accountEpoch; state.authLoading = true; state.authUnavailable = false; render();
+  try {
+    const data = await jsonRequest('/api/auth/me');
+    if (epoch !== state.accountEpoch) return;
+    if (data.user !== null && !validUser(data.user)) throw new Error('계정 정보를 확인하지 못했어요.');
+    if (data.user?.id !== state.user?.id) resetAccountScope();
+    state.user = data.user; state.authLoading = false; state.authUnavailable = false;
+    if (state.user) await Promise.all([loadAccountRecords(), loadCareChecks()]);
+  } catch (error) { if (epoch === state.accountEpoch) { state.authLoading = false; state.authUnavailable = true; state.authError = error.message; } }
+  finally { render(); }
+}
+async function submitAuth(form) {
+  if (state.authBusy || state.authLoading || state.authUnavailable || state.working || state.saving || state.deleting || state.careSaving || state.reading.size) return;
+  const nickname = form.elements.nickname.value.trim(), password = form.elements.password.value, mode = form.dataset.authForm;
+  if (!nickname || !password) { state.authError = '닉네임과 시연용 비밀번호를 입력해 주세요.'; render(); return; }
+  state.authBusy = true; state.authError = ''; render();
+  try {
+    const data = await jsonRequest(`/api/auth/${mode}`, { method: 'POST', body: { nickname, password } });
+    if (!validUser(data.user)) throw new Error('계정 정보를 확인하지 못했어요. 다시 로그인해 주세요.');
+    resetAccountScope(); state.user = data.user; state.authBusy = false;
+    go('analysis'); toast(`${data.user.nickname}님, ${mode === 'register' ? '시연 계정을 만들었어요.' : '로그인했어요.'}`);
+    await Promise.all([loadAccountRecords(), loadCareChecks()]);
+  } catch (error) { state.authError = error.message; }
+  finally { state.authBusy = false; render(); }
+}
+async function logout() {
+  if (!state.user || state.authBusy || state.working || state.saving || state.deleting || state.careSaving || state.reading.size) return;
+  state.authBusy = true; render();
+  try {
+    await jsonRequest('/api/auth/logout', { method: 'POST', body: {} });
+    resetAccountScope(); state.user = null; state.authBusy = false; state.authError = ''; go('analysis'); toast('로그아웃했어요. 다음 분도 새 계정으로 시작할 수 있어요.');
+  } catch (error) { toast(error.message); }
+  finally { state.authBusy = false; render(); }
+}
+async function loadAccountRecords() {
+  if (!state.user || state.recordsLoading) return;
+  const epoch = state.accountEpoch; state.recordsLoading = true; state.recordsError = ''; render();
+  try {
+    const data = await accountRequest('/api/records');
+    if (epoch !== state.accountEpoch) return;
+    if (!Array.isArray(data.records) || !data.records.every(validRecord)) throw new Error('저장한 기록을 확인하지 못했어요. 다시 불러와 주세요.');
+    state.accountRecords = data.records.map(storedRecord); state.historyInitialized = false;
+  } catch (error) { if (epoch === state.accountEpoch) state.recordsError = error.message; }
+  finally { if (epoch === state.accountEpoch) { state.recordsLoading = false; render(); } }
+}
+async function clearRecords() {
+  if (state.deleting || state.saving || state.authLoading || state.authUnavailable) return;
+  if (!confirm(state.user ? '이 계정에 저장한 분석 결과를 모두 지울까요? 지운 기록은 되돌릴 수 없어요.' : '이 브라우저에 저장한 결과를 모두 지울까요? 지운 기록은 되돌릴 수 없어요.')) return;
+  const epoch = state.accountEpoch; state.deleting = true; render();
+  try {
+    if (state.user) { await accountRequest('/api/records', { method: 'DELETE' }); if (epoch !== state.accountEpoch) return; state.accountRecords = []; }
+    else localStorage.removeItem(STORAGE_KEY);
+    state.savedId = null; state.historyInitialized = false; toast('저장한 기록을 모두 지웠어요.');
+  } catch (error) { if (epoch === state.accountEpoch) toast(error.message || '기록을 지우지 못했어요. 다시 시도해 주세요.'); }
+  finally { if (epoch === state.accountEpoch) { state.deleting = false; render(true); } }
+}
+function careResult() { return state.result || readRecords().at(-1); }
+function care() {
+  if (!state.user && state.careDate !== today()) { state.careChecks = new Set(); state.careDate = today(); }
+  const header = intro('분석에서 일상으로', '나에게 맞는 관리를 이어가요.', '사진 분석 등급과 피지 유무에 맞춘 생활 관리 안내예요. 진단이나 치료를 대신하지 않아요.');
+  if (state.authLoading || state.recordsLoading) return `${header}<section class="surface empty-state" role="status"><h2>나의 관리 안내를 준비하고 있어요</h2></section>`;
+  if (state.authUnavailable) return `${header}${accountDataError('account')}`;
+  if (state.user && state.recordsError && !state.result) return `${header}${accountDataError('records')}`;
+  const result = careResult();
+  if (!result) return `${header}${accountContext()}${emptyState('분석 결과로 맞춤 관리를 시작해요', '사진 한 장을 분석하면 네 가지 항목의 결과에 맞춰 실천할 관리 습관을 안내해 드려요.')}`;
+  const plan = buildCarePlan(result), complete = plan.items.filter(item => state.careChecks.has(item.id)).length;
+  return `${header}${accountContext()}<section class="surface care-summary"><div><span class="section-kicker">관리 안내의 기준</span><h2>${shortDate(result.date)} 분석 결과</h2><p>${plan.note ? escapeHTML(plan.note) : '가장 최근에 확인한 분석 결과를 기준으로 안내해요.'}</p></div><div class="care-grade-summary">${result.metrics.map((metric, index) => `<span>${metricName(metric)}<strong class="grade-text grade-${metricGrade(metric)}">${escapeHTML(metricLabel(metric))}</strong></span>`).join('')}</div></section>${legacyAnalysisNotice(result)}<section class="surface care-routine"><div class="surface-heading"><div><p class="section-kicker">${shortDate(today())} · 오늘의 실천</p><h2>작은 습관부터 하나씩 해봐요</h2></div><span class="care-check-count" data-care-count role="status">${complete} / ${plan.items.length} 실천</span></div>${state.careLoading ? '<p class="form-hint" role="status">오늘의 실천 기록을 불러오고 있어요.</p>' : ''}${state.careError ? `<div class="inline-notice error" role="alert"><p>${escapeHTML(state.careError)}</p>${button('실천 기록 다시 불러오기', 'reload-care', true)}</div>` : ''}<div class="care-items">${plan.items.map(item => `<label class="care-task ${state.careChecks.has(item.id) ? 'is-done' : ''}"><input type="checkbox" data-care-check="${escapeHTML(item.id)}" ${state.careChecks.has(item.id) ? 'checked' : ''} ${state.careLoading || state.careSaving || !!state.careError ? 'disabled' : ''}><span class="care-task-copy"><span class="care-reason">${escapeHTML(item.reason)}</span><strong>${escapeHTML(item.title)}</strong><span>${escapeHTML(item.text)}</span></span></label>`).join('')}</div><p class="save-note">${state.user ? state.careSaving ? '오늘의 실천을 저장하고 있어요.' : '체크한 실천은 오늘 날짜로 내 계정에 자동 저장돼요.' : '게스트의 실천 표시는 이 페이지를 사용하는 동안 유지돼요. 로그인하면 계정에 보관할 수 있어요.'}</p></section><details class="details-panel" data-details="care-sources"><summary><span>관리 안내의 근거 살펴보기</span><span>생활 관리 정보의 출처를 확인해요</span></summary><div class="details-content"><p>사진의 분석 등급에 따라 아래 생활 관리 정보에서 관련 안내를 골랐어요. 약이나 제품을 처방하는 기능은 아니에요.</p><ul class="care-sources">${plan.sources.map(source => `<li><a href="${escapeHTML(source.url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(source.title)} ↗</a></li>`).join('')}</ul></div></details><div class="bottom-actions"><a class="button secondary" href="#guide">다음 촬영 준비하기${icon('camera')}</a>${button('새 사진 분석하기', 'new', true, 'photo')}</div>`;
+}
+function ensureCareLoaded() {
+  if (!state.careLoading && !state.careSaving && state.careDate !== today()) {
+    if (state.user) loadCareChecks();
+    else { state.careChecks = new Set(); state.careDate = today(); }
+  }
+}
+const CARE_CHECK_IDS = ['gentle-wash', 'low-heat', 'observe', 'flakes-care', 'sebum-care', 'hair-care', 'redness-care'];
+function validCareChecks(data, date) { return data && data.date === date && Array.isArray(data.checks) && data.checks.length <= CARE_CHECK_IDS.length && new Set(data.checks).size === data.checks.length && data.checks.every(id => CARE_CHECK_IDS.includes(id)); }
+async function loadCareChecks() {
+  if (!state.user || state.careLoading || state.careSaving) return;
+  const epoch = state.accountEpoch, date = today(); state.careLoading = true; state.careError = '';
+  if (state.careDate !== date) state.careChecks = new Set();
+  state.careDate = date; render();
+  try {
+    const data = await accountRequest(`/api/care-checks?date=${date}`);
+    if (epoch !== state.accountEpoch) return;
+    if (!validCareChecks(data, date)) throw new Error('오늘의 실천 기록을 확인하지 못했어요. 다시 불러와 주세요.');
+    state.careChecks = new Set(data.checks);
+  } catch (error) { if (epoch === state.accountEpoch) state.careError = error.message; }
+  finally { if (epoch === state.accountEpoch) { state.careLoading = false; render(); } }
+}
+async function toggleCareCheck(input) {
+  if (state.careLoading || state.careSaving || state.careError || !CARE_CHECK_IDS.includes(input.dataset.careCheck)) return;
+  const epoch = state.accountEpoch, before = new Set(state.careChecks), date = today(), id = input.dataset.careCheck;
+  if (state.careDate !== date) { state.careChecks = new Set(); state.careDate = date; }
+  if (input.checked) state.careChecks.add(id); else state.careChecks.delete(id);
+  if (!state.user) { render(); return; }
+  state.careSaving = true; render();
+  try {
+    const data = await accountRequest('/api/care-checks', { method: 'PUT', body: { date, checks: [...state.careChecks] } });
+    if (epoch !== state.accountEpoch) return;
+    if (!validCareChecks(data, date)) throw new Error('실천 기록을 확인하지 못했어요. 다시 불러와 주세요.');
+    state.careChecks = new Set(data.checks);
+  } catch (error) { if (epoch === state.accountEpoch) { state.careChecks = before; state.careError = error.message; } }
+  finally { if (epoch === state.accountEpoch) { state.careSaving = false; render(); } }
+}
+document.addEventListener('submit', event => {
+  if (event.target.matches('[data-auth-form]')) { event.preventDefault(); submitAuth(event.target); }
+});
+
+function currentPage() { const route = location.hash.slice(1) || 'analysis'; return ['analysis', 'report', 'history', 'care', 'guide', 'about', 'login', 'register'].includes(route) ? route : 'analysis'; }
 function focusContent(selector = 'h1') { requestAnimationFrame(() => $('#main').querySelector(selector)?.focus({ preventScroll: true })); }
 function render(focus = false) {
   const page = currentPage();
+  const authDraft = $('#main').dataset.page === page && $('[data-auth-form]') ? { nickname: $('#auth-nickname')?.value, password: $('#auth-password')?.value } : null;
   // Keep expanded details and keyboard focus when only asynchronous status changes.
   const opened = $$('details[open][data-details]').map(el => el.dataset.details);
   const focused = document.activeElement;
@@ -291,9 +522,13 @@ function render(focus = false) {
   const focusData = ['date', 'range', 'record'].map(key => [key, focused?.dataset?.[key]]).find(([, value]) => value !== undefined);
   const scrollY = window.scrollY;
   $$('[data-nav]').forEach(link => { const active = link.dataset.nav === page || (page === 'report' && link.dataset.nav === 'analysis'); link.classList.toggle('active', active); if (active) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current'); });
-  $('#main').innerHTML = ({ analysis, report, history, care, about })[page]();
+  renderAccountMenu();
+  $('#main').innerHTML = ({ analysis, report, history, care, guide, about, login: () => authPage('login'), register: () => authPage('register') })[page]();
+  $('#main').dataset.page = page;
+  if (authDraft && $('[data-auth-form]')) { $('#auth-nickname').value = authDraft.nickname || ''; $('#auth-password').value = authDraft.password || ''; }
+  if (page === 'care') ensureCareLoaded();
   opened.forEach(key => { const details = $$('details[data-details]').find(el => el.dataset.details === key); if (details) details.open = true; });
-  document.title = `${{ analysis: '사진 분석', report: '분석 결과', history: '내 기록', care: '촬영 가이드', about: '서비스 소개' }[page]} | 딥러닝 기반 ai 두피 관리 서비스`;
+  document.title = `${{ analysis: '사진 분석', report: '분석 결과', history: '내 기록', care: '맞춤 관리', guide: '촬영 가이드', login: '로그인', register: '회원가입', about: '서비스 소개' }[page]} | 딥러닝 기반 AI 두피 관리 서비스`;
   $('#server-status').textContent = !CAN_FETCH ? 'AI 서버에서 열기' : state.health.status === 'ready' ? 'AI 모델 연결됨' : state.health.status === 'loading' ? 'AI 모델 준비 중' : 'AI 서버 연결 필요';
   $('#server-dot').dataset.status = state.health.status;
   if (focus) focusContent(page === 'analysis' ? '[data-step-title]' : 'h1');
@@ -312,7 +547,7 @@ function setStep(step) {
   state.step = step; state.maxStep = Math.max(state.maxStep, step); state.uploadNote = ''; render(true);
   window.scrollTo({ top: 0, behavior: 'instant' });
 }
-function invalidateResult() { state.result = null; state.resultPhotos = []; state.savedId = null; }
+function invalidateResult() { state.result = null; state.resultPhotos = []; state.savedId = null; state.saveToken = null; }
 function releasePhoto(index) { if (state.photos[index]?.url) URL.revokeObjectURL(state.photos[index].url); state.photos[index] = null; state.fileToken[index]++; }
 async function readPhoto(file, index) {
   if (!file || state.working) return false;
@@ -357,34 +592,52 @@ let elapsedTimer;
 function updateElapsed() { const el = $('[data-elapsed]'); if (el && state.startedAt) el.textContent = `· ${Math.floor((Date.now() - state.startedAt) / 1000)}초 경과`; }
 async function analyzePhotos() {
   const photos = state.photos.filter(Boolean);
-  if (!photos.length || state.step !== 3 || state.working || state.reading.size || state.health.status !== 'ready' || !CAN_FETCH) return;
+  if (state.authLoading || state.authUnavailable || !photos.length || state.step !== 3 || state.working || state.reading.size || state.health.status !== 'ready' || !CAN_FETCH) return;
+  const epoch = state.accountEpoch;
   state.working = true; state.error = ''; state.startedAt = Date.now(); invalidateResult(); render(true);
   elapsedTimer = setInterval(updateElapsed, 1000);
   const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 180000);
   try {
     const body = new FormData(); photos.forEach(photo => body.append('photos', photo.file));
-    const response = await fetch('/api/analyze', { method: 'POST', body, signal: controller.signal });
+    const response = await fetch('/api/analyze', { method: 'POST', body, signal: controller.signal, headers: { 'X-Scalp-Account': state.user ? String(state.user.id) : 'guest' } });
     let data; try { data = await response.json(); } catch { throw new Error('결과를 불러오지 못했어요. 선택한 사진은 그대로 있으니 다시 분석해 주세요.'); }
     if (!response.ok) {
+      if (response.status === 409 && data.code === 'account_changed') { await refreshChangedAccount(); return; }
       const messages = { 400: '사진을 확인하지 못했어요. 사진의 형식과 크기를 살펴본 뒤 다시 골라 주세요.', 413: '사진 용량이 너무 커요. 한 장에 10MB 이하인 사진을 최대 3장 골라 주세요.', 429: '다른 분석이 진행 중이에요. 잠시 기다린 뒤 다시 눌러 주세요.', 503: '분석할 준비가 아직 끝나지 않았어요. 잠시 후 다시 눌러 주세요.' };
       throw new Error(messages[response.status] || '분석을 마치지 못했어요. 사진은 그대로 남아 있으니 잠시 후 다시 시도해 주세요.');
     }
     if (!validRecord(data) || data.photo_count !== photos.length) throw new Error('결과를 확인하지 못했어요. 잠시 후 같은 사진으로 다시 분석해 주세요.');
-    state.result = storedRecord(data); state.resultPhotos = photos.map(photo => photo.url);
+    if (epoch !== state.accountEpoch) return;
+    state.result = storedRecord(data); state.saveToken = typeof data.save_token === 'string' ? data.save_token : null; state.resultPhotos = photos.map(photo => photo.url);
     state.selectedDate = data.date; state.year = Number(data.date.slice(0, 4)); state.month = Number(data.date.slice(5, 7)) - 1;
     state.working = false; go('report'); toast('분석이 끝났어요. 네 가지 결과를 살펴보세요.');
   } catch (error) {
+    if (epoch !== state.accountEpoch) return;
     state.error = error.name === 'AbortError' ? '분석이 예상보다 오래 걸려 중단했어요. 사진은 그대로 남아 있으니 잠시 후 다시 시도해 주세요.' : error.name === 'TypeError' ? '연결이 끊어졌어요. 선택한 사진은 그대로 남아 있으니 연결을 확인한 뒤 다시 시도해 주세요.' : error.message;
     state.working = false; go('analysis');
   } finally { clearTimeout(timeout); clearInterval(elapsedTimer); state.working = false; state.startedAt = null; render(true); }
 }
-function saveResult() {
-  if (!state.result || state.savedId) return;
+async function saveResult() {
+  if (!state.result || state.savedId || state.saving || state.authLoading || state.authUnavailable) return;
+  const epoch = state.accountEpoch, result = storedRecord(state.result);
+  state.saving = true; render();
   try {
-    const records = readRecords();
-    if (!records.some(r => r.id === state.result.id)) localStorage.setItem(STORAGE_KEY, JSON.stringify([...records, storedRecord(state.result)]));
-    state.savedId = state.result.id; state.selectedDate = state.result.date; render(true); toast('오늘의 결과를 저장했어요. 내 기록에서 다시 볼 수 있어요.');
-  } catch { toast('기록을 저장할 공간이 부족하거나 저장이 제한돼 있어요. 결과 인쇄하기로 남길 수도 있어요.'); }
+    if (state.user) {
+      if (!state.saveToken) throw new Error('이 결과를 계정에 저장하려면 사진을 다시 분석해 주세요.');
+      const data = await accountRequest('/api/records', { method: 'POST', body: { record: result, save_token: state.saveToken } });
+      if (epoch !== state.accountEpoch) return;
+      if (!validRecord(data.record)) throw new Error('저장한 기록을 확인하지 못했어요. 다시 시도해 주세요.');
+      state.accountRecords = [...state.accountRecords.filter(record => record.id !== data.record.id), storedRecord(data.record)];
+      state.recordsError = '';
+    } else {
+      const records = readRecords();
+      if (!records.some(record => record.id === result.id)) localStorage.setItem(STORAGE_KEY, JSON.stringify([...records, result]));
+    }
+    if (epoch !== state.accountEpoch) return;
+    state.savedId = result.id; state.selectedDate = result.date;
+    toast('오늘의 결과를 저장했어요. 내 기록에서 다시 볼 수 있어요.');
+  } catch (error) { if (epoch === state.accountEpoch) toast(error.message || '기록을 저장하지 못했어요. 다시 시도해 주세요.'); }
+  finally { if (epoch === state.accountEpoch) { state.saving = false; render(true); } }
 }
 function startNew(skipGuide = false) {
   if (state.working) return;
@@ -400,6 +653,7 @@ function changeMonth(delta) {
 document.addEventListener('change', event => {
   if (event.target.matches('[data-file]')) { state.error = ''; state.uploadNote = ''; readPhoto(event.target.files[0], Number(event.target.dataset.file)); }
   if (event.target.matches('[data-bulk]')) addPhotos(event.target.files);
+  if (event.target.matches('[data-care-check]')) toggleCareCheck(event.target);
   if (event.target.matches('[data-check]')) { const i = Number(event.target.dataset.check); if (event.target.checked) state.checks.add(i); else state.checks.delete(i); $('.check-count').textContent = `${state.checks.size} / 3 확인`; }
 });
 document.addEventListener('click', event => {
@@ -423,18 +677,45 @@ document.addEventListener('click', event => {
     case 'analyze': analyzePhotos(); break;
     case 'select-photos': if (!state.working) $('#photos-bulk')?.click(); break;
     case 'health': state.health.status = 'loading'; render(); refreshHealth(); break;
-    case 'start': if (currentPage() === 'care' && photoCount()) { state.step = 2; go('analysis'); } else startNew(currentPage() === 'care'); break;
+    case 'start': if (currentPage() === 'guide' && photoCount()) { state.step = 2; go('analysis'); } else startNew(currentPage() === 'guide'); break;
     case 'new': startNew(true); break;
     case 'print': window.print(); break;
     case 'save': saveResult(); break;
     case 'prev-month': changeMonth(-1); break;
     case 'next-month': changeMonth(1); break;
-    case 'clear-records': if (confirm('이 브라우저에 저장한 결과를 모두 지울까요? 지운 기록은 되돌릴 수 없어요.')) { try { localStorage.removeItem(STORAGE_KEY); state.savedId = null; render(true); toast('저장한 기록을 모두 지웠어요.'); } catch { toast('기록을 지우지 못했어요. 브라우저 저장 설정을 확인해 주세요.'); } } break;
+    case 'clear-records': clearRecords(); break;
+    case 'logout': logout(); break;
+    case 'reload-records': loadAccountRecords(); break;
+    case 'reload-care': loadCareChecks(); break;
+    case 'retry-account': bootstrapAccount(); break;
+
   }
 });
 document.addEventListener('dragover', event => { const zone = event.target.closest('[data-drop]'); if (zone) { event.preventDefault(); if (!state.working) zone.classList.add('is-dragging'); } });
 document.addEventListener('dragleave', event => { const zone = event.target.closest('[data-drop]'); if (zone && !zone.contains(event.relatedTarget)) zone.classList.remove('is-dragging'); });
 document.addEventListener('drop', event => { const zone = event.target.closest('[data-drop]'); if (zone) { event.preventDefault(); zone.classList.remove('is-dragging'); if (!state.working) addPhotos(event.dataTransfer.files); } });
 window.addEventListener('hashchange', () => { render(true); window.scrollTo({ top: 0, behavior: 'instant' }); });
+let checkingFocusedAccount = false;
+function accountInteractionBusy() {
+  return state.authLoading || state.authBusy || state.working || state.saving || state.deleting || state.careSaving || !!state.reading.size;
+}
+async function checkAccountOnFocus() {
+  if (!CAN_FETCH || document.hidden || state.authUnavailable || checkingFocusedAccount || accountInteractionBusy()) return;
+  const epoch = state.accountEpoch;
+  checkingFocusedAccount = true;
+  try {
+    // Returning from a native file picker also focuses the window. Keep the live
+    // file input attached so its subsequent change event reaches the document.
+    const data = await jsonRequest('/api/auth/me');
+    if (epoch !== state.accountEpoch || accountInteractionBusy()) return;
+    if (data.user !== null && !validUser(data.user)) return;
+    if (data.user?.id !== state.user?.id) await refreshChangedAccount();
+  } catch {
+    // Keep the current selection on a transient connection failure. Every
+    // account operation still checks the session and account identity server-side.
+  } finally { checkingFocusedAccount = false; }
+}
+window.addEventListener('focus', checkAccountOnFocus);
 render();
 refreshHealth();
+bootstrapAccount();

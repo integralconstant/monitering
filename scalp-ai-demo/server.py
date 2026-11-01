@@ -5,12 +5,16 @@ from __future__ import annotations
 import argparse
 import io
 import logging
+import os
+import sqlite3
 import warnings
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, g, jsonify, request, send_from_directory
 from PIL import Image, ImageOps, UnidentifiedImageError
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
+
+from accounts import AccountError, AccountStore, COOKIE_NAME, SESSION_SECONDS
 
 BASE_DIR = Path(__file__).resolve().parent
 MAX_FILE_BYTES = 10 * 1024 * 1024
@@ -37,7 +41,7 @@ def decode_photo(upload) -> Image.Image:
         raise ValueError("읽을 수 없는 사진입니다. JPG, PNG, WEBP 파일을 확인하세요.") from exc
 
 
-def create_app(service=None) -> Flask:
+def create_app(service=None, database_path=None) -> Flask:
     app = Flask(__name__, static_folder=str(BASE_DIR / "dist"), static_url_path="")
     app.config.update(MAX_CONTENT_LENGTH=32 * 1024 * 1024, MAX_FORM_PARTS=6)
     # Keep multipart uploads in memory; do not spool scalp photos to a temp file.
@@ -53,6 +57,99 @@ def create_app(service=None) -> Flask:
         service = ModelService()
         service.start_loading()
     app.extensions["model_service"] = service
+    accounts = AccountStore(database_path or os.environ.get("SCALP_DB_PATH") or BASE_DIR / "data" / "scalp.sqlite3")
+    app.extensions["account_store"] = accounts
+
+    @app.before_request
+    def local_api_context():
+        if not request.path.startswith("/api/"):
+            return None
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            origin = request.headers.get("Origin")
+            if (origin and origin != request.host_url.rstrip("/")) or request.headers.get("Sec-Fetch-Site") == "cross-site":
+                return jsonify(error="이 웹 서버에서 다시 시도해 주세요."), 403
+        g.user = accounts.current_user(request.cookies.get(COOKIE_NAME))
+        if request.path in {"/api/records", "/api/care-checks", "/api/analyze"} and "X-Scalp-Account" in request.headers:
+            expected_account = str(g.user["id"]) if g.user else "guest"
+            if request.headers["X-Scalp-Account"] != expected_account:
+                return jsonify(error="계정이 변경됐어요. 로그인 상태를 다시 확인해 주세요.", code="account_changed"), 409
+
+    def require_user():
+        if not g.user:
+            raise AccountError("로그인 후 이용해 주세요.", 401)
+        return g.user["id"]
+
+    def json_body():
+        if request.mimetype != "application/json":
+            raise AccountError("JSON 형식으로 요청해 주세요.", 415)
+        if request.content_length and request.content_length > 512 * 1024:
+            raise AccountError("요청 내용이 너무 큽니다.", 413)
+        body = request.get_json()
+        if not isinstance(body, dict):
+            raise AccountError("요청 내용을 확인해 주세요.")
+        return body
+
+    def session_response(user, status=200):
+        token = accounts.new_session(user["id"], request.cookies.get(COOKIE_NAME))
+        response = jsonify(user=user)
+        response.set_cookie(COOKIE_NAME, token, max_age=SESSION_SECONDS, httponly=True,
+                            secure=request.is_secure, samesite="Lax", path="/")
+        return response, status
+
+    @app.get("/api/auth/me")
+    def current_account():
+        return jsonify(user=g.user)
+
+    @app.post("/api/auth/register")
+    def register():
+        return session_response(accounts.register(json_body()), 201)
+
+    @app.post("/api/auth/login")
+    def login():
+        return session_response(accounts.login(json_body()))
+
+    @app.post("/api/auth/logout")
+    def logout():
+        json_body()
+        accounts.logout(request.cookies.get(COOKIE_NAME))
+        response = jsonify(user=None)
+        response.delete_cookie(COOKIE_NAME, httponly=True, samesite="Lax", path="/")
+        return response
+
+    @app.get("/api/records")
+    def account_records():
+        return jsonify(records=accounts.records(require_user()))
+
+    @app.post("/api/records")
+    def save_account_record():
+        user_id = require_user()
+        record, created = accounts.save_record(user_id, json_body())
+        return jsonify(record=record), 201 if created else 200
+
+    @app.delete("/api/records")
+    def delete_account_records():
+        return jsonify(deleted=accounts.clear_records(require_user()))
+
+    @app.get("/api/care-checks")
+    def get_care_checks():
+        return jsonify(accounts.care_checks(require_user(), request.args.get("date")))
+
+    @app.put("/api/care-checks")
+    def save_care_checks():
+        user_id = require_user()
+        body = json_body()
+        if "checks" not in body or body["checks"] is None:
+            raise AccountError("관리 체크 항목을 확인해 주세요.")
+        return jsonify(accounts.care_checks(user_id, body.get("date"), body["checks"]))
+
+    @app.errorhandler(AccountError)
+    def account_error(exc):
+        return jsonify(error=str(exc)), exc.status
+
+    @app.errorhandler(sqlite3.Error)
+    def database_error(exc):
+        app.logger.exception("Account database operation failed")
+        return jsonify(error="기록 저장소에 연결하지 못했어요. 잠시 후 다시 시도해 주세요."), 500
 
     @app.get("/")
     def index():
@@ -76,7 +173,9 @@ def create_app(service=None) -> Flask:
                 raise ValueError("두피 사진을 1~3장 선택하세요.")
             for upload in uploads:
                 images.append(decode_photo(upload))
-            return jsonify(service.analyze(images))
+            result = service.analyze(images)
+            result["save_token"] = accounts.sign_result(result, g.user["id"] if g.user else None)
+            return jsonify(result)
         except ValueError as exc:
             return jsonify(error=str(exc)), 400
         except ModelUnavailable as exc:
