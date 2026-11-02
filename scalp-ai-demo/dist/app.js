@@ -327,7 +327,7 @@ function guide() {
   return `${intro('사진 한 장을 위한 작은 도움', '이렇게 찍으면 준비 끝이에요.', '어렵게 생각하지 마세요. 두피가 선명하게 보이는 사진이면 좋아요.')}<div class="guide-cards">${tips.map((t, i) => `<article class="surface guide-card"><div class="guide-example">${icon(t[3])}<span class="guide-number">0${i + 1}</span></div><p class="section-kicker">${t[0]}</p><h2>${t[1]}</h2><p>${t[2]}</p></article>`).join('')}</div><section class="surface care-checklist"><div class="surface-heading"><div><p class="section-kicker">촬영 전 마지막 확인</p><h2>하나씩 확인해 볼까요?</h2></div><span class="check-count">${state.checks.size} / 3 확인</span></div>${['두피가 잘 보이도록 모발을 나눴어요.', '흔들림과 빛 반사 없이 선명하게 보여요.', '여러 장이면 같은 부위를 촬영했어요.'].map((text, i) => `<label class="task"><input type="checkbox" data-check="${i}" ${state.checks.has(i) ? 'checked' : ''}><span>${text}</span></label>`).join('')}<div class="flow-actions"><p class="save-note">확인 표시는 이 페이지를 사용하는 동안 유지돼요.</p>${button('준비한 사진 고르기', 'start')}</div></section>`;
 }
 function about() {
-  return `${intro('서비스 소개', '사진에서 시작하는 두피 기록.', '딥러닝 기반 AI 두피 관리 서비스')}<section class="surface about-hero"><h2>내 두피를 살펴보는 시간을<br>조금 더 쉽게 만들고 싶었어요.</h2><p>사진 한 장으로 각질, 피지 유무, 탈모 여부, 모낭사이홍반의 네 가지 항목을 살펴보고 결과를 기록하는 서비스예요.</p><p>각질은 학습 코드에 맞춰 정상·경중등도·중증으로 정리해요. 경중등도는 경증과 중등도를 합친 등급이에요. 피지는 무·유로 표시하며 경증 이상 분석값을 합쳐 유무를 판정해요. 탈모 여부와 모낭사이홍반은 정상·경증·중증으로 표시하며, 이미지 처리 설정을 확인 중이에요. 결과는 관찰 참고용으로 제공해요.</p><div class="about-credits"><div><span>만든 곳</span><strong>대림대학교 · 지공모</strong></div><div><span>팀원</span><strong>연일 · 이승철 · 김진형</strong></div><div><span>지도교수</span><strong>김영실 · 박상윤</strong></div></div></section>`;
+  return `${intro('서비스 소개', '사진에서 시작하는 두피 기록.', '딥러닝 기반 AI 두피 관리 서비스')}<section class="surface about-hero"><h2>내 두피를 살펴보는 시간을<br>조금 더 쉽게 만들고 싶었어요.</h2><p>사진 한 장으로 각질, 피지 유무, 탈모 여부, 모낭사이홍반의 네 가지 항목을 살펴보고 결과를 기록하는 서비스예요.</p><p>각질은 정상·경중등도·중증으로 정리해요. 경중등도는 경증과 중등도를 합친 등급이에요. 피지는 유·무 여부로 표시하며 경증 이상 분석값을 합쳐 유무를 판정해요. 탈모 여부와 모낭사이홍반은 정상·경증·중증으로 표시해요. 결과는 관찰 참고용으로 제공해요.</p><div class="about-credits"><div><span>만든 곳</span><strong>대림대학교 · 지공모</strong></div><div><span>팀원</span><strong>연일 · 이승철 · 김진형</strong></div><div><span>지도교수</span><strong>김영실 · 박상윤</strong></div></div></section>`;
 }
 
 function recordStorageCopy() {
@@ -346,18 +346,20 @@ function renderAccountMenu() {
   if (!menu) return;
   if (state.authLoading) { menu.innerHTML = '<span class="account-status" role="status">계정 확인 중</span>'; return; }
   if (state.authUnavailable) { menu.innerHTML = '<button class="text-button" data-action="retry-account">계정 다시 연결</button>'; return; }
-  const busy = state.authBusy || state.working || state.saving || state.deleting || state.careSaving || !!state.reading.size;
+  const busy = state.authBusy || state.working || state.saving || state.deleting || state.careSaving || !!state.reading.size || adminState.mutating || adminState.loading;
   menu.innerHTML = state.user
-    ? `<span class="account-user">${icon('lock')}<strong data-account-name>${escapeHTML(state.user.nickname)}</strong><span>님</span></span><button class="account-link" data-action="logout" ${busy ? 'disabled' : ''}>${state.authBusy ? '로그아웃 중' : '로그아웃'}</button>`
+    ? `<span class="account-user">${icon('lock')}<strong data-account-name>${escapeHTML(state.user.nickname)}</strong><span>님</span></span>${isAdmin() ? `<a class="account-link admin-link" data-admin-link href="#admin" ${currentPage() === 'admin' ? 'aria-current="page"' : ''}>관리자 페이지</a>` : ''}<button class="account-link" data-action="logout" ${busy ? 'disabled' : ''}>${state.authBusy ? '로그아웃 중' : '로그아웃'}</button>`
     : '<a class="account-link" href="#login">로그인</a><a class="account-link join-link" href="#register">시연 계정 만들기</a>';
 }
 function authPage(mode) {
   if (state.user) return `${intro('나의 계정', `${escapeHTML(state.user.nickname)}님, 반가워요.`, '분석 결과와 오늘의 관리를 계정에 모아 보세요.')}<section class="surface auth-already"><a class="button" href="#history">내 기록 보기${icon('arrow')}</a><a class="button secondary" href="#care">맞춤 관리 보기${icon('leaf')}</a></section>`;
   const signup = mode === 'register';
-  const busy = state.authLoading || state.authBusy || state.working || !!state.reading.size || state.saving || state.deleting || state.careSaving;
+  const busy = state.authLoading || state.authBusy || state.working || !!state.reading.size || state.saving || state.deleting || state.careSaving || adminState.mutating || adminState.loading;
   return `${intro('대회용 로컬 시연 계정', signup ? '나만의 두피 기록을 시작해요.' : '다시 만나 반가워요.', signup ? '닉네임과 시연용 비밀번호만 있으면 돼요.' : '만들어 둔 닉네임과 시연용 비밀번호를 입력해 주세요.')}<div class="auth-layout"><section class="surface auth-card"><div class="auth-tabs"><a href="#login" ${!signup ? 'aria-current="page"' : ''}>로그인</a><a href="#register" ${signup ? 'aria-current="page"' : ''}>계정 만들기</a></div><form data-auth-form="${mode}" aria-busy="${busy}"><label class="form-field" for="auth-nickname"><span>닉네임</span><input id="auth-nickname" name="nickname" type="text" maxlength="40" autocomplete="username" required ${busy ? 'disabled' : ''} placeholder="예: 두피관찰자"></label><label class="form-field" for="auth-password"><span>시연용 비밀번호</span><input id="auth-password" name="password" type="password" maxlength="128" autocomplete="${signup ? 'new-password' : 'current-password'}" required aria-describedby="demo-password-help" ${busy ? 'disabled' : ''}></label><p class="form-hint" id="demo-password-help">시연 전용 비밀번호(예: 246810)를 만들어 주세요. 실제 비밀번호나 생년월일은 입력하지 마세요.</p><p class="inline-notice error" id="auth-error" role="alert" ${state.authError ? '' : 'hidden'}>${escapeHTML(state.authError)}</p>${state.working ? '<p class="form-hint">사진 분석이 끝나면 계정을 변경할 수 있어요.</p>' : ''}<button class="button" data-auth-submit type="submit" ${busy || state.authUnavailable || !CAN_FETCH ? 'disabled' : ''}>${state.authBusy ? '잠시만 기다려 주세요' : signup ? '시연 계정 만들기' : '로그인하기'}${icon('arrow')}</button></form>${state.authUnavailable ? accountDataError('account') : ''}<a class="text-button guest-link" href="#analysis">게스트로 사진 분석하기 ${icon('arrow')}</a></section><aside class="auth-benefits"><span class="section-kicker">나를 위한 작은 기록장</span><h2>사진 한 장에서<br>매일의 관리까지</h2><p>${icon('calendar')} 내 계정에 분석 결과를 모아요.</p><p>${icon('leaf')} 결과에 맞는 관리 습관을 살펴봐요.</p><p>${icon('check')} 오늘 실천한 관리를 체크해요.</p><div class="guide-callout"><strong>이 PC에서 사용하는 시연 서비스예요</strong><p>계정과 기록은 이 PC에 보관돼요. 게스트로 남긴 기존 기록은 로그인해도 그대로 보존되며, 계정 기록과 따로 보여요.</p></div></aside></div>`;
 }
-function validUser(user) { return user && Number.isInteger(user.id) && user.id > 0 && typeof user.nickname === 'string' && user.nickname.length <= 40; }
+function validUser(user) { return user && Number.isInteger(user.id) && user.id > 0 && typeof user.nickname === 'string' && user.nickname.length > 0 && user.nickname.length <= 40 && ['user', 'admin'].includes(user.role) && Number.isInteger(user.result_epoch) && user.result_epoch >= 0; }
+function isAdmin() { return state.user?.role === 'admin'; }
+function accountHeaders() { return { 'X-Scalp-Account': state.user ? String(state.user.id) : 'guest', ...(state.user ? { 'X-Scalp-Result-Epoch': String(state.user.result_epoch) } : {}) }; }
 async function jsonRequest(url, options = {}) {
   const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 12000);
   const { body, ...rest } = options;
@@ -375,6 +377,7 @@ async function jsonRequest(url, options = {}) {
 }
 function resetAccountScope() {
   state.accountEpoch++;
+  resetAdminScope();
   state.photos.forEach((_, index) => releasePhoto(index)); state.reading.clear(); invalidateResult();
   state.accountRecords = []; state.recordsLoading = false; state.recordsError = ''; state.historyInitialized = false;
   state.careChecks = new Set(); state.careDate = ''; state.careLoading = false; state.careSaving = false; state.careError = '';
@@ -386,34 +389,38 @@ function expireSession() {
   resetAccountScope(); state.user = null; state.authLoading = false; state.authUnavailable = false; state.authBusy = false;
   state.authError = '로그인이 만료됐어요. 다시 로그인해 주세요.'; go('login'); toast(state.authError);
 }
-async function refreshChangedAccount() {
+async function refreshAccountContext(message) {
   resetAccountScope(); state.user = null; state.working = false; state.authBusy = false; state.authLoading = true;
-  go('analysis'); await bootstrapAccount(); toast('사용 중인 계정이 바뀌었어요. 현재 계정으로 다시 확인해 주세요.');
+  go('analysis'); await bootstrapAccount(); toast(message);
 }
+async function refreshChangedAccount() { return refreshAccountContext('사용 중인 계정이 바뀌었어요. 현재 계정으로 다시 확인해 주세요.'); }
+async function refreshChangedData() { return refreshAccountContext('관리자가 기록을 초기화했어요. 현재 기록을 다시 불러왔으니 새 사진으로 분석해 주세요.'); }
 async function accountRequest(url, options = {}) {
-  try { return await jsonRequest(url, { ...options, headers: { ...(options.headers || {}), 'X-Scalp-Account': state.user ? String(state.user.id) : 'guest' } }); }
+  try { return await jsonRequest(url, { ...options, headers: { ...(options.headers || {}), ...accountHeaders() } }); }
   catch (error) {
     if (error.status === 409 && error.code === 'account_changed') await refreshChangedAccount();
+    else if (error.status === 409 && error.code === 'data_changed') await refreshChangedData();
+    else if (error.status === 403 && error.code === 'admin_required') await refreshAccountContext('관리자 권한을 다시 확인했어요. 현재 계정에서 이용할 수 있는 화면으로 이동했어요.');
     else if (error.status === 401 && state.user) expireSession();
     throw error;
   }
 }
 async function bootstrapAccount() {
   if (!CAN_FETCH) { state.authLoading = false; state.authUnavailable = false; render(); return; }
-  if (state.authBusy || state.working || state.saving || state.deleting || state.careSaving) return;
+  if (state.authBusy || state.working || state.saving || state.deleting || state.careSaving || adminState.mutating) return;
   const epoch = state.accountEpoch; state.authLoading = true; state.authUnavailable = false; render();
   try {
     const data = await jsonRequest('/api/auth/me');
     if (epoch !== state.accountEpoch) return;
     if (data.user !== null && !validUser(data.user)) throw new Error('계정 정보를 확인하지 못했어요.');
-    if (data.user?.id !== state.user?.id) resetAccountScope();
+    if (data.user?.id !== state.user?.id || data.user?.role !== state.user?.role || data.user?.result_epoch !== state.user?.result_epoch) resetAccountScope();
     state.user = data.user; state.authLoading = false; state.authUnavailable = false;
     if (state.user) await Promise.all([loadAccountRecords(), loadCareChecks()]);
   } catch (error) { if (epoch === state.accountEpoch) { state.authLoading = false; state.authUnavailable = true; state.authError = error.message; } }
   finally { render(); }
 }
 async function submitAuth(form) {
-  if (state.authBusy || state.authLoading || state.authUnavailable || state.working || state.saving || state.deleting || state.careSaving || state.reading.size) return;
+  if (state.authBusy || state.authLoading || state.authUnavailable || state.working || state.saving || state.deleting || state.careSaving || state.reading.size || adminState.mutating || adminState.loading) return;
   const nickname = form.elements.nickname.value.trim(), password = form.elements.password.value, mode = form.dataset.authForm;
   if (!nickname || !password) { state.authError = '닉네임과 시연용 비밀번호를 입력해 주세요.'; render(); return; }
   state.authBusy = true; state.authError = ''; render();
@@ -427,7 +434,7 @@ async function submitAuth(form) {
   finally { state.authBusy = false; render(); }
 }
 async function logout() {
-  if (!state.user || state.authBusy || state.working || state.saving || state.deleting || state.careSaving || state.reading.size) return;
+  if (!state.user || state.authBusy || state.working || state.saving || state.deleting || state.careSaving || state.reading.size || adminState.mutating || adminState.loading) return;
   state.authBusy = true; render();
   try {
     await jsonRequest('/api/auth/logout', { method: 'POST', body: {} });
@@ -509,10 +516,11 @@ document.addEventListener('submit', event => {
   if (event.target.matches('[data-auth-form]')) { event.preventDefault(); submitAuth(event.target); }
 });
 
-function currentPage() { const route = location.hash.slice(1) || 'analysis'; return ['analysis', 'report', 'history', 'care', 'guide', 'about', 'login', 'register'].includes(route) ? route : 'analysis'; }
+function currentPage() { const route = location.hash.slice(1) || 'analysis'; return ['analysis', 'report', 'history', 'care', 'guide', 'about', 'login', 'register', 'admin'].includes(route) ? route : 'analysis'; }
 function focusContent(selector = 'h1') { requestAnimationFrame(() => $('#main').querySelector(selector)?.focus({ preventScroll: true })); }
 function render(focus = false) {
   const page = currentPage();
+  if (page !== 'admin') adminState.credentials = null;
   const authDraft = $('#main').dataset.page === page && $('[data-auth-form]') ? { nickname: $('#auth-nickname')?.value, password: $('#auth-password')?.value } : null;
   // Keep expanded details and keyboard focus when only asynchronous status changes.
   const opened = $$('details[open][data-details]').map(el => el.dataset.details);
@@ -523,12 +531,13 @@ function render(focus = false) {
   const scrollY = window.scrollY;
   $$('[data-nav]').forEach(link => { const active = link.dataset.nav === page || (page === 'report' && link.dataset.nav === 'analysis'); link.classList.toggle('active', active); if (active) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current'); });
   renderAccountMenu();
-  $('#main').innerHTML = ({ analysis, report, history, care, guide, about, login: () => authPage('login'), register: () => authPage('register') })[page]();
+  $('#main').innerHTML = ({ analysis, report, history, care, guide, about, admin: adminPage, login: () => authPage('login'), register: () => authPage('register') })[page]();
   $('#main').dataset.page = page;
   if (authDraft && $('[data-auth-form]')) { $('#auth-nickname').value = authDraft.nickname || ''; $('#auth-password').value = authDraft.password || ''; }
   if (page === 'care') ensureCareLoaded();
+  if (page === 'admin') ensureAdminLoaded();
   opened.forEach(key => { const details = $$('details[data-details]').find(el => el.dataset.details === key); if (details) details.open = true; });
-  document.title = `${{ analysis: '사진 분석', report: '분석 결과', history: '내 기록', care: '맞춤 관리', guide: '촬영 가이드', login: '로그인', register: '회원가입', about: '서비스 소개' }[page]} | 딥러닝 기반 AI 두피 관리 서비스`;
+  document.title = `${{ analysis: '사진 분석', report: '분석 결과', history: '내 기록', care: '맞춤 관리', guide: '촬영 가이드', login: '로그인', register: '회원가입', about: '서비스 소개', admin: '관리자 페이지' }[page]} | 딥러닝 기반 AI 두피 관리 서비스`;
   $('#server-status').textContent = !CAN_FETCH ? 'AI 서버에서 열기' : state.health.status === 'ready' ? 'AI 모델 연결됨' : state.health.status === 'loading' ? 'AI 모델 준비 중' : 'AI 서버 연결 필요';
   $('#server-dot').dataset.status = state.health.status;
   if (focus) focusContent(page === 'analysis' ? '[data-step-title]' : 'h1');
@@ -599,10 +608,11 @@ async function analyzePhotos() {
   const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 180000);
   try {
     const body = new FormData(); photos.forEach(photo => body.append('photos', photo.file));
-    const response = await fetch('/api/analyze', { method: 'POST', body, signal: controller.signal, headers: { 'X-Scalp-Account': state.user ? String(state.user.id) : 'guest' } });
+    const response = await fetch('/api/analyze', { method: 'POST', body, signal: controller.signal, headers: accountHeaders() });
     let data; try { data = await response.json(); } catch { throw new Error('결과를 불러오지 못했어요. 선택한 사진은 그대로 있으니 다시 분석해 주세요.'); }
     if (!response.ok) {
       if (response.status === 409 && data.code === 'account_changed') { await refreshChangedAccount(); return; }
+      if (response.status === 409 && data.code === 'data_changed') { await refreshChangedData(); return; }
       const messages = { 400: '사진을 확인하지 못했어요. 사진의 형식과 크기를 살펴본 뒤 다시 골라 주세요.', 413: '사진 용량이 너무 커요. 한 장에 10MB 이하인 사진을 최대 3장 골라 주세요.', 429: '다른 분석이 진행 중이에요. 잠시 기다린 뒤 다시 눌러 주세요.', 503: '분석할 준비가 아직 끝나지 않았어요. 잠시 후 다시 눌러 주세요.' };
       throw new Error(messages[response.status] || '분석을 마치지 못했어요. 사진은 그대로 남아 있으니 잠시 후 다시 시도해 주세요.');
     }
@@ -697,7 +707,7 @@ document.addEventListener('drop', event => { const zone = event.target.closest('
 window.addEventListener('hashchange', () => { render(true); window.scrollTo({ top: 0, behavior: 'instant' }); });
 let checkingFocusedAccount = false;
 function accountInteractionBusy() {
-  return state.authLoading || state.authBusy || state.working || state.saving || state.deleting || state.careSaving || !!state.reading.size;
+  return state.authLoading || state.authBusy || state.working || state.saving || state.deleting || state.careSaving || !!state.reading.size || adminState.mutating || adminState.loading;
 }
 async function checkAccountOnFocus() {
   if (!CAN_FETCH || document.hidden || state.authUnavailable || checkingFocusedAccount || accountInteractionBusy()) return;
@@ -710,6 +720,8 @@ async function checkAccountOnFocus() {
     if (epoch !== state.accountEpoch || accountInteractionBusy()) return;
     if (data.user !== null && !validUser(data.user)) return;
     if (data.user?.id !== state.user?.id) await refreshChangedAccount();
+    else if (data.user?.role !== state.user?.role) await refreshAccountContext('계정 권한이 변경되어 현재 이용할 수 있는 화면으로 이동했어요.');
+    else if (data.user?.result_epoch !== state.user?.result_epoch) await refreshChangedData();
   } catch {
     // Keep the current selection on a transient connection failure. Every
     // account operation still checks the session and account identity server-side.

@@ -69,15 +69,30 @@ def create_app(service=None, database_path=None) -> Flask:
             if (origin and origin != request.host_url.rstrip("/")) or request.headers.get("Sec-Fetch-Site") == "cross-site":
                 return jsonify(error="이 웹 서버에서 다시 시도해 주세요."), 403
         g.user = accounts.current_user(request.cookies.get(COOKIE_NAME))
-        if request.path in {"/api/records", "/api/care-checks", "/api/analyze"} and "X-Scalp-Account" in request.headers:
+        protected = request.path in {"/api/records", "/api/care-checks", "/api/analyze"} or request.path.startswith("/api/admin/")
+        if protected and "X-Scalp-Account" in request.headers:
             expected_account = str(g.user["id"]) if g.user else "guest"
             if request.headers["X-Scalp-Account"] != expected_account:
                 return jsonify(error="계정이 변경됐어요. 로그인 상태를 다시 확인해 주세요.", code="account_changed"), 409
+        if protected and "X-Scalp-Result-Epoch" in request.headers:
+            expected_epoch = str(g.user["result_epoch"]) if g.user else "0"
+            if request.headers["X-Scalp-Result-Epoch"] != expected_epoch:
+                return jsonify(error="관리자가 기록을 초기화했어요. 현재 계정의 기록을 다시 확인해 주세요.", code="data_changed"), 409
 
     def require_user():
         if not g.user:
             raise AccountError("로그인 후 이용해 주세요.", 401)
         return g.user["id"]
+
+    def require_admin():
+        user_id = require_user()
+        if g.user["role"] != "admin":
+            raise AccountError("관리자만 이용할 수 있어요.", 403, "admin_required")
+        return user_id
+
+    def confirmed_target(body, user_id):
+        if type(body.get("confirm_user_id")) is not int or body["confirm_user_id"] != user_id:
+            raise AccountError("초기화하거나 삭제할 계정 번호를 확인해 주세요.")
 
     def json_body():
         if request.mimetype != "application/json":
@@ -90,7 +105,7 @@ def create_app(service=None, database_path=None) -> Flask:
         return body
 
     def session_response(user, status=200):
-        token = accounts.new_session(user["id"], request.cookies.get(COOKIE_NAME))
+        token = accounts.new_session(user["id"], request.cookies.get(COOKIE_NAME), result_epoch=user["result_epoch"])
         response = jsonify(user=user)
         response.set_cookie(COOKIE_NAME, token, max_age=SESSION_SECONDS, httponly=True,
                             secure=request.is_secure, samesite="Lax", path="/")
@@ -128,11 +143,11 @@ def create_app(service=None, database_path=None) -> Flask:
 
     @app.delete("/api/records")
     def delete_account_records():
-        return jsonify(deleted=accounts.clear_records(require_user()))
+        return jsonify(deleted=accounts.clear_records(require_user(), result_epoch=g.user["result_epoch"]))
 
     @app.get("/api/care-checks")
     def get_care_checks():
-        return jsonify(accounts.care_checks(require_user(), request.args.get("date")))
+        return jsonify(accounts.care_checks(require_user(), request.args.get("date"), result_epoch=g.user["result_epoch"]))
 
     @app.put("/api/care-checks")
     def save_care_checks():
@@ -140,11 +155,47 @@ def create_app(service=None, database_path=None) -> Flask:
         body = json_body()
         if "checks" not in body or body["checks"] is None:
             raise AccountError("관리 체크 항목을 확인해 주세요.")
-        return jsonify(accounts.care_checks(user_id, body.get("date"), body["checks"]))
+        return jsonify(accounts.care_checks(user_id, body.get("date"), body["checks"], result_epoch=g.user["result_epoch"]))
+
+    @app.get("/api/admin/overview")
+    def admin_overview():
+        actor_id = require_admin()
+        status = dict(service.health())
+        status["error"] = str(service.error)[:2000] if getattr(service, "error", None) else None
+        return jsonify(counts=accounts.admin_summary(actor_id), health=status)
+
+    @app.get("/api/admin/users")
+    def admin_users():
+        return jsonify(users=accounts.admin_users(require_admin()))
+
+    @app.get("/api/admin/actions")
+    def admin_actions():
+        return jsonify(actions=accounts.admin_actions(require_admin()))
+
+    @app.post("/api/admin/users/<int:user_id>/reset-password")
+    def admin_reset_password(user_id):
+        actor_id = require_admin()
+        json_body()
+        return jsonify(accounts.admin_reset_password(actor_id, user_id))
+
+    @app.post("/api/admin/users/<int:user_id>/clear-data")
+    def admin_clear_data(user_id):
+        actor_id = require_admin()
+        confirmed_target(json_body(), user_id)
+        return jsonify(accounts.admin_clear_data(actor_id, user_id))
+
+    @app.delete("/api/admin/users/<int:user_id>")
+    def admin_delete_user(user_id):
+        actor_id = require_admin()
+        confirmed_target(json_body(), user_id)
+        return jsonify(accounts.admin_delete_user(actor_id, user_id))
 
     @app.errorhandler(AccountError)
     def account_error(exc):
-        return jsonify(error=str(exc)), exc.status
+        payload = {"error": str(exc)}
+        if exc.code:
+            payload["code"] = exc.code
+        return jsonify(payload), exc.status
 
     @app.errorhandler(sqlite3.Error)
     def database_error(exc):
@@ -174,8 +225,10 @@ def create_app(service=None, database_path=None) -> Flask:
             for upload in uploads:
                 images.append(decode_photo(upload))
             result = service.analyze(images)
-            result["save_token"] = accounts.sign_result(result, g.user["id"] if g.user else None)
+            result["save_token"] = accounts.sign_result(result, g.user["id"] if g.user else None, result_epoch=g.user["result_epoch"] if g.user else 0)
             return jsonify(result)
+        except AccountError:
+            raise
         except ValueError as exc:
             return jsonify(error=str(exc)), 400
         except ModelUnavailable as exc:

@@ -23,9 +23,10 @@ METRIC_FIELDS = ("id", "label", "class_index", "confidence", "probabilities", "c
 
 
 class AccountError(ValueError):
-    def __init__(self, message, status=400):
+    def __init__(self, message, status=400, code=None):
         super().__init__(message)
         self.status = status
+        self.code = code
 
 
 def valid_date(value):
@@ -92,7 +93,9 @@ class AccountStore:
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     nickname TEXT NOT NULL, password_hash TEXT NOT NULL,
-                    created_at INTEGER NOT NULL
+                    created_at INTEGER NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('user','admin')),
+                    result_epoch INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS users_nickname ON users(nickname);
                 CREATE TABLE IF NOT EXISTS sessions (
@@ -110,7 +113,21 @@ class AccountStore:
                     PRIMARY KEY(user_id, check_date)
                 );
                 CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS admin_actions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    actor_id INTEGER NOT NULL, actor_nickname TEXT NOT NULL,
+                    target_id INTEGER NOT NULL, target_nickname TEXT NOT NULL,
+                    action TEXT NOT NULL, created_at INTEGER NOT NULL, details TEXT NOT NULL
+                );
             """)
+            # Serialize idempotent migration across server processes. Existing
+            # accounts retain their IDs, hashes, records and sessions as members.
+            db.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(users)")}
+            if "role" not in columns:
+                db.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('user','admin'))")
+            if "result_epoch" not in columns:
+                db.execute("ALTER TABLE users ADD COLUMN result_epoch INTEGER NOT NULL DEFAULT 0")
             db.execute("INSERT OR IGNORE INTO metadata(key,value) VALUES ('signing_secret',?)", (secrets.token_hex(32),))
             self.signing_secret = db.execute("SELECT value FROM metadata WHERE key='signing_secret'").fetchone()[0].encode()
 
@@ -135,6 +152,14 @@ class AccountStore:
         return nickname.strip(), password
 
     def register(self, body):
+        # Public signup always creates an ordinary account, regardless of input.
+        return self._create_user(body, "user")
+
+    def create_admin(self, nickname, password):
+        """Operator-only entry point, exposed by the local CLI, never an HTTP route."""
+        return self._create_user({"nickname": nickname, "password": password}, "admin")
+
+    def _create_user(self, body, role):
         nickname, password = self.credentials(body)
         password_hash = generate_password_hash(password)
         with self.connection() as db:
@@ -142,21 +167,26 @@ class AccountStore:
             candidates = db.execute("SELECT password_hash FROM users WHERE nickname=?", (nickname,)).fetchall()
             if any(check_password_hash(row["password_hash"], password) for row in candidates):
                 raise AccountError("같은 닉네임과 시연용 비밀번호로 만든 계정이 있어요. 로그인해 주세요.", 409)
-            cursor = db.execute("INSERT INTO users(nickname,password_hash,created_at) VALUES (?,?,?)", (nickname, password_hash, int(time.time())))
-            return {"id": cursor.lastrowid, "nickname": nickname}
+            cursor = db.execute("INSERT INTO users(nickname,password_hash,created_at,role) VALUES (?,?,?,?)", (nickname, password_hash, int(time.time()), role))
+            user = {"id": cursor.lastrowid, "nickname": nickname, "role": role, "result_epoch": 0}
+            if role == "admin":
+                self._audit(db, user, user, "admin_created", {})
+            return user
 
     def login(self, body):
         nickname, password = self.credentials(body)
         with self.connection() as db:
-            candidates = db.execute("SELECT id,nickname,password_hash FROM users WHERE nickname=? ORDER BY id", (nickname,)).fetchall()
+            candidates = db.execute("SELECT id,nickname,password_hash,role,result_epoch FROM users WHERE nickname=? ORDER BY id", (nickname,)).fetchall()
         for row in candidates:
             if check_password_hash(row["password_hash"], password):
-                return {"id": row["id"], "nickname": row["nickname"]}
+                return {key: row[key] for key in ("id", "nickname", "role", "result_epoch")}
         raise AccountError("닉네임과 시연용 비밀번호를 다시 확인해 주세요.", 401)
 
-    def new_session(self, user_id, old_token=None):
+    def new_session(self, user_id, old_token=None, result_epoch=None):
         token = secrets.token_urlsafe(32)
         with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._check_epoch(db, user_id, result_epoch)
             db.execute("DELETE FROM sessions WHERE expires_at<=?", (int(time.time()),))
             if old_token:
                 db.execute("DELETE FROM sessions WHERE token_hash=?", (self.token_hash(old_token),))
@@ -171,7 +201,7 @@ class AccountStore:
         if not token or len(token) > 200:
             return None
         with self.connection() as db:
-            row = db.execute("SELECT users.id,users.nickname FROM sessions JOIN users ON users.id=sessions.user_id WHERE sessions.token_hash=? AND sessions.expires_at>?", (self.token_hash(token), int(time.time()))).fetchone()
+            row = db.execute("SELECT users.id,users.nickname,users.role,users.result_epoch FROM sessions JOIN users ON users.id=sessions.user_id WHERE sessions.token_hash=? AND sessions.expires_at>?", (self.token_hash(token), int(time.time()))).fetchone()
         return dict(row) if row else None
 
     def logout(self, token):
@@ -179,26 +209,53 @@ class AccountStore:
             with self.connection() as db:
                 db.execute("DELETE FROM sessions WHERE token_hash=?", (self.token_hash(token),))
 
-    def sign_result(self, result, user_id):
-        digest = hashlib.sha256(canonical(record_payload(result)).encode()).hexdigest()
-        message = f"{user_id if user_id is not None else 'guest'}.{digest}"
+    @staticmethod
+    def _epoch(db, user_id):
+        if user_id is None:
+            return 0
+        row = db.execute("SELECT result_epoch FROM users WHERE id=?", (user_id,)).fetchone()
+        if row is None:
+            raise AccountError("로그인 후 이용해 주세요.", 401)
+        return row["result_epoch"]
+
+    @classmethod
+    def _check_epoch(cls, db, user_id, expected):
+        current = cls._epoch(db, user_id)
+        if expected is not None and expected != current:
+            raise AccountError("관리자가 기록 또는 비밀번호를 초기화했어요. 로그인 상태를 다시 확인해 주세요.", 409, "data_changed")
+        return current
+
+    def _signed_payload(self, record, user_id, epoch):
+        digest = hashlib.sha256(canonical(record).encode()).hexdigest()
+        message = f"{user_id if user_id is not None else 'guest'}.{epoch}.{digest}"
         return message + "." + hmac.new(self.signing_secret, message.encode(), hashlib.sha256).hexdigest()
+
+    def sign_result(self, result, user_id, result_epoch=None):
+        if result_epoch is None:
+            with self.connection() as db:
+                result_epoch = self._epoch(db, user_id)
+        # An in-flight analysis keeps the epoch captured at request start, so a
+        # reset during inference cannot accidentally issue a fresh valid proof.
+        return self._signed_payload(record_payload(result), user_id, result_epoch)
 
     def save_record(self, user_id, body):
         record = record_payload(body.get("record"))
         token = body.get("save_token") or body["record"].get("save_token")
-        expected = self.sign_result(record, user_id)
-        if not isinstance(token, str) or not token.isascii() or len(token) > 200 or not hmac.compare_digest(token, expected):
-            raise AccountError("이 계정에서 분석한 결과만 저장할 수 있어요. 사진을 다시 분석해 주세요.", 403)
-        if (set(record) != set(RECORD_FIELDS) or record["source"] != "model"
-                or not isinstance(record["id"], str) or not 1 <= len(record["id"]) <= 200
-                or not valid_date(record["date"]) or record["aggregation"] != "mean_probabilities"
-                or type(record["photo_count"]) is not int or not 1 <= record["photo_count"] <= 3
-                or len(record["metrics"]) != 4 or tuple(metric["id"] for metric in record["metrics"]) != METRIC_IDS
-                or len(record["per_photo"]) != record["photo_count"]):
-            raise AccountError("저장할 분석 결과의 형식이 올바르지 않습니다.")
-        payload = canonical(record)
         with self.connection() as db:
+            # Proof verification and insertion share a write transaction with
+            # administrator cleanup. An old page cannot restore cleared data.
+            db.execute("BEGIN IMMEDIATE")
+            expected = self._signed_payload(record, user_id, self._epoch(db, user_id))
+            if not isinstance(token, str) or not token.isascii() or len(token) > 200 or not hmac.compare_digest(token, expected):
+                raise AccountError("이 계정에서 현재 설정으로 분석한 결과만 저장할 수 있어요. 사진을 다시 분석해 주세요.", 403)
+            if (set(record) != set(RECORD_FIELDS) or record["source"] != "model"
+                    or not isinstance(record["id"], str) or not 1 <= len(record["id"]) <= 200
+                    or not valid_date(record["date"]) or record["aggregation"] != "mean_probabilities"
+                    or type(record["photo_count"]) is not int or not 1 <= record["photo_count"] <= 3
+                    or len(record["metrics"]) != 4 or tuple(metric["id"] for metric in record["metrics"]) != METRIC_IDS
+                    or len(record["per_photo"]) != record["photo_count"]):
+                raise AccountError("저장할 분석 결과의 형식이 올바르지 않습니다.")
+            payload = canonical(record)
             cursor = db.execute("INSERT OR IGNORE INTO records(user_id,record_id,record_date,payload) VALUES (?,?,?,?)", (user_id, record["id"], record["date"], payload))
             created = cursor.rowcount == 1
             saved = json.loads(db.execute("SELECT payload FROM records WHERE user_id=? AND record_id=?", (user_id, record["id"])).fetchone()[0])
@@ -209,11 +266,13 @@ class AccountStore:
             rows = db.execute("SELECT payload FROM records WHERE user_id=? ORDER BY record_date, rowid", (user_id,)).fetchall()
         return [json.loads(row[0]) for row in rows]
 
-    def clear_records(self, user_id):
+    def clear_records(self, user_id, result_epoch=None):
         with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._check_epoch(db, user_id, result_epoch)
             return db.execute("DELETE FROM records WHERE user_id=?", (user_id,)).rowcount
 
-    def care_checks(self, user_id, check_date, checks=None):
+    def care_checks(self, user_id, check_date, checks=None, result_epoch=None):
         if not valid_date(check_date):
             raise AccountError("관리 기록의 날짜를 확인해 주세요.")
         if checks is not None and (not isinstance(checks, list) or len(checks) > len(CHECK_IDS)
@@ -221,7 +280,101 @@ class AccountStore:
                                   or len(set(checks)) != len(checks)):
             raise AccountError("관리 체크 항목을 확인해 주세요.")
         with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE" if checks is not None else "BEGIN")
+            self._check_epoch(db, user_id, result_epoch)
             if checks is not None:
                 db.execute("INSERT INTO care_checks(user_id,check_date,checks) VALUES (?,?,?) ON CONFLICT(user_id,check_date) DO UPDATE SET checks=excluded.checks", (user_id, check_date, json.dumps(sorted(checks))))
             row = db.execute("SELECT checks FROM care_checks WHERE user_id=? AND check_date=?", (user_id, check_date)).fetchone()
         return {"date": check_date, "checks": json.loads(row[0]) if row else []}
+
+    @staticmethod
+    def _require_admin(db, actor_id):
+        row = db.execute("SELECT id,nickname,role,result_epoch FROM users WHERE id=?", (actor_id,)).fetchone()
+        if row is None:
+            raise AccountError("로그인 후 이용해 주세요.", 401)
+        if row["role"] != "admin":
+            raise AccountError("관리자만 이용할 수 있어요.", 403, "admin_required")
+        return row
+
+    @staticmethod
+    def _member_target(db, target_id):
+        if type(target_id) is not int or target_id <= 0:
+            raise AccountError("관리할 계정 번호를 확인해 주세요.")
+        row = db.execute("SELECT id,nickname,role,result_epoch FROM users WHERE id=?", (target_id,)).fetchone()
+        if row is None:
+            raise AccountError("해당 계정을 찾을 수 없어요. 목록을 다시 불러와 주세요.", 404)
+        if row["role"] != "user":
+            raise AccountError("관리자 계정은 이 화면에서 변경하거나 삭제할 수 없어요.", 403)
+        return row
+
+    @staticmethod
+    def _audit(db, actor, target, action, details):
+        # Snapshot IDs and names intentionally survive removal of the target.
+        db.execute("INSERT INTO admin_actions(actor_id,actor_nickname,target_id,target_nickname,action,created_at,details) VALUES (?,?,?,?,?,?,?)", (
+            actor["id"], actor["nickname"], target["id"], target["nickname"], action,
+            int(time.time()), json.dumps(details, ensure_ascii=False, separators=(",", ":")),
+        ))
+
+    def admin_summary(self, actor_id):
+        with self.connection() as db:
+            db.execute("BEGIN")
+            self._require_admin(db, actor_id)
+            users = db.execute("SELECT COUNT(*) AS accounts,COALESCE(SUM(role='user'),0) AS members,COALESCE(SUM(role='admin'),0) AS admins FROM users").fetchone()
+            return {**dict(users), "records": db.execute("SELECT COUNT(*) FROM records").fetchone()[0],
+                    "care_days": db.execute("SELECT COUNT(*) FROM care_checks").fetchone()[0]}
+
+    def admin_users(self, actor_id):
+        with self.connection() as db:
+            db.execute("BEGIN")
+            self._require_admin(db, actor_id)
+            rows = db.execute("SELECT u.id,u.nickname,u.role,u.created_at,(SELECT COUNT(*) FROM records r WHERE r.user_id=u.id) AS record_count,(SELECT COUNT(*) FROM care_checks c WHERE c.user_id=u.id) AS care_days FROM users u ORDER BY u.id").fetchall()
+            return [dict(row) for row in rows]
+
+    def admin_actions(self, actor_id, limit=50):
+        with self.connection() as db:
+            db.execute("BEGIN")
+            self._require_admin(db, actor_id)
+            rows = db.execute("SELECT * FROM admin_actions ORDER BY id DESC LIMIT ?", (min(max(int(limit),1),200),)).fetchall()
+            return [{**dict(row), "details": json.loads(row["details"])} for row in rows]
+
+    def admin_reset_password(self, actor_id, target_id):
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            actor = self._require_admin(db, actor_id)
+            target = self._member_target(db, target_id)
+            existing_hashes = [row[0] for row in db.execute("SELECT password_hash FROM users WHERE nickname=?", (target["nickname"],))]
+            for _ in range(20):
+                temporary = f"{secrets.randbelow(100_000_000):08d}"
+                if not any(check_password_hash(value, temporary) for value in existing_hashes):
+                    break
+            else:
+                raise AccountError("임시 비밀번호를 만들지 못했어요. 다시 시도해 주세요.", 409)
+            db.execute("UPDATE users SET password_hash=?,result_epoch=result_epoch+1 WHERE id=?", (generate_password_hash(temporary), target_id))
+            revoked = db.execute("DELETE FROM sessions WHERE user_id=?", (target_id,)).rowcount
+            self._audit(db, actor, target, "password_reset", {"revoked_sessions": revoked})
+            return {"user": {key: target[key] for key in ("id", "nickname", "role")},
+                    "temporary_password": temporary, "revoked_sessions": revoked}
+
+    def admin_clear_data(self, actor_id, target_id):
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            actor = self._require_admin(db, actor_id)
+            target = self._member_target(db, target_id)
+            records = db.execute("DELETE FROM records WHERE user_id=?", (target_id,)).rowcount
+            care = db.execute("DELETE FROM care_checks WHERE user_id=?", (target_id,)).rowcount
+            db.execute("UPDATE users SET result_epoch=result_epoch+1 WHERE id=?", (target_id,))
+            self._audit(db, actor, target, "data_cleared", {"deleted_records": records, "deleted_care_days": care})
+            return {"user_id": target_id, "deleted_records": records, "deleted_care_days": care}
+
+    def admin_delete_user(self, actor_id, target_id):
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            actor = self._require_admin(db, actor_id)
+            target = self._member_target(db, target_id)
+            records = db.execute("SELECT COUNT(*) FROM records WHERE user_id=?", (target_id,)).fetchone()[0]
+            care = db.execute("SELECT COUNT(*) FROM care_checks WHERE user_id=?", (target_id,)).fetchone()[0]
+            sessions = db.execute("SELECT COUNT(*) FROM sessions WHERE user_id=?", (target_id,)).fetchone()[0]
+            db.execute("DELETE FROM users WHERE id=?", (target_id,))
+            self._audit(db, actor, target, "user_deleted", {"deleted_records": records, "deleted_care_days": care, "revoked_sessions": sessions})
+            return {"deleted_user_id": target_id, "deleted_records": records,
+                    "deleted_care_days": care, "revoked_sessions": sessions}
