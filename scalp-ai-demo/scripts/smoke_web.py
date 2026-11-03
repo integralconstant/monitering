@@ -352,7 +352,8 @@ def open_details_for(page, selector):
 
 def assert_pdf_download(page):
     """A real analysis exports a PDF file without opening the print dialog."""
-    page.evaluate("window.__smokePrintCalls = 0; window.print = () => { window.__smokePrintCalls += 1; }")
+    page.evaluate("() => { window.__smokePrintCalls = 0; window.print = () => { window.__smokePrintCalls += 1; }; }")
+    assert page.evaluate("window.__smokePrintCalls") == 0
     export = page.locator('[data-action="download-pdf"]')
     expect(export).to_have_text(re.compile("PDF"))
     with page.expect_response(
@@ -569,7 +570,7 @@ def main():
         expect(page.locator('[data-sebum-chart]')).to_contain_text("무")
         expect(page.locator('[data-sebum-chart]')).to_contain_text("유")
         assert "피지" not in page.locator("[data-severity-chart]").text_content()
-        day = page.locator('[data-date]').first
+        day = page.locator(f'[data-date="{saved[0]["date"]}"]')
         selected_date = day.get_attribute('data-date')
         day.focus()
         page.keyboard.press('Enter')

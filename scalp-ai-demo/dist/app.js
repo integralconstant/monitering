@@ -492,7 +492,7 @@ function render(focus = false) {
   restoreMemberDraft(authDraft);
   const camera = $('[data-scalp-camera]');
   if (camera && keepCamera) camera.replaceWith(oldCamera);
-  else if (camera && window.ScalpCamera) { camera.dataset.scope = String(state.accountEpoch); ScalpCamera.mount({ onCapture: file => addPhotos([file]), onMessage: toast }); }
+  else if (camera && window.ScalpCamera) { camera.dataset.scope = String(state.accountEpoch); ScalpCamera.mount({ onCapture: acceptCameraPhoto, onMessage: toast }); }
   if (page === 'history') ensureCareLoaded();
   if (page === 'admin') ensureAdminLoaded();
   opened.forEach(key => { const details = $$('details[data-details]').find(el => el.dataset.details === key); if (details) details.open = true; });
@@ -543,6 +543,12 @@ async function addPhotos(files) {
   if (incoming.length > empty.length) state.uploadNote = empty.length ? `사진은 최대 3장까지 골라요. 처음 ${empty.length}개 파일만 확인했어요.` : '사진은 최대 3장까지 골라요. 바꾸고 싶은 사진을 먼저 지워 주세요.';
   for (let i = 0; i < Math.min(incoming.length, empty.length); i++) await readPhoto(incoming[i], empty[i]);
   render();
+}
+async function acceptCameraPhoto(file) {
+  if (state.working || state.reading.size) { toast('사진 확인이 끝난 뒤 다시 촬영해 주세요.'); return false; }
+  if (photoCount() >= 3) { toast('사진은 최대 3장이에요. 바꾸고 싶은 사진을 먼저 지워 주세요.'); return false; }
+  await addPhotos([file]);
+  return state.photos.some(photo => photo?.file === file);
 }
 let healthTimer;
 async function refreshHealth() {

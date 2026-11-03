@@ -75,6 +75,8 @@ async function toggleCareCheck(input) {
   if (state.careLoading || state.careSaving || state.careError || state.careDate !== state.selectedDate || state.selectedDate > today() || !CARE_CHECK_IDS.includes(input.dataset.careCheck)) return;
   const epoch = state.accountEpoch, before = new Set(state.careChecks), date = state.selectedDate, id = input.dataset.careCheck;
   if (input.checked) state.careChecks.add(id); else state.careChecks.delete(id);
+  // A monthly read begun before this write must not replace its updated mark.
+  state.careMonthToken++; state.careMonthLoading = false;
   state.careSaving = true; render();
   try {
     const checks = [...state.careChecks];
@@ -84,7 +86,7 @@ async function toggleCareCheck(input) {
     if (epoch !== state.accountEpoch) return;
     if (!validCareChecks(data, date)) throw new Error('저장한 실천 기록을 확인하지 못했어요.');
     state.careChecks = new Set(data.checks); state.careDays[date] = data.checks;
-  } catch (error) { if (epoch === state.accountEpoch) { state.careChecks = before; state.careError = error.message; } }
+  } catch (error) { if (epoch === state.accountEpoch) { state.careChecks = before; state.careError = ['QuotaExceededError', 'SecurityError'].includes(error.name) ? '이 브라우저에 실천 기록을 저장하지 못했어요. 저장 공간과 브라우저 설정을 확인해 주세요.' : error.message; } }
   finally { if (epoch === state.accountEpoch) { state.careSaving = false; render(); } }
 }
 async function downloadPDF() {
@@ -107,6 +109,6 @@ async function downloadPDF() {
     const blob = await response.blob(), url = URL.createObjectURL(blob), link = document.createElement('a');
     link.href = url; link.download = `두피_분석_보고서_${result.date}.pdf`; document.body.append(link); link.click(); link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 10000); toast('PDF 보고서를 저장했어요. 브라우저의 다운로드 목록을 확인해 주세요.');
-  } catch (error) { if (epoch === state.accountEpoch) toast(error.name === 'AbortError' ? 'PDF 준비가 오래 걸리고 있어요. 다시 시도해 주세요.' : error.message); }
+  } catch (error) { if (epoch === state.accountEpoch) toast(error.name === 'AbortError' ? 'PDF 준비가 오래 걸리고 있어요. 다시 시도해 주세요.' : error.name === 'TypeError' ? '연결을 확인하지 못했어요. 잠시 후 다시 시도해 주세요.' : error.message); }
   finally { clearTimeout(timeout); state.pdfBusy = false; render(); }
 }
