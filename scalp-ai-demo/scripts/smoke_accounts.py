@@ -28,7 +28,7 @@ from playwright.sync_api import expect, sync_playwright
 
 from smoke_web import (
     KEY, assert_grade_presentation, assert_layout, assert_result,
-    browser_executable, next_step, ready, screenshot, test_photo, legacy_sebum_metric, set_probabilities, assert_customer_copy,
+    browser_executable, next_step, ready, screenshot, test_photo, legacy_sebum_metric, set_probabilities, assert_customer_copy, open_trend, back_to_history,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -217,8 +217,12 @@ def run_flow(url, output):
         page.locator('[data-nav="history"]').click()
         expect(page.locator("[data-record]")).to_have_count(1)
         expect(page.locator("[data-record]")).to_have_attribute("data-record", result["id"])
-        expect(page.locator("[data-severity-chart] circle")).to_have_count(3)
-        expect(page.locator("[data-sebum-chart] circle")).to_have_count(1)
+        expect(page.locator('[data-history-trends] [data-trend-link]')).to_have_count(4)
+        expect(page.locator('[data-trend-chart]')).to_have_count(0)
+        open_trend(page, 'flakes')
+        back_to_history(page)
+        open_trend(page, 'sebum')
+        back_to_history(page)
         page.locator("[data-record]").click()
         expect(page.locator(".result-thumbnail")).to_have_count(0)
         expect(page.locator(".metric-value").nth(1)).to_have_text(result["metrics"][1]["label"])

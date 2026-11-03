@@ -257,48 +257,6 @@ function graphRecords(range) {
   const from = anchor.toISOString().slice(0, 10);
   return records.filter(r => r.configuration_id === configuration && (range === 'week' ? r.date >= from && r.date <= today() : r.date.startsWith(month)));
 }
-function legend(range = state.range) {
-  const records = graphRecords(range);
-  if (!records.length) return '';
-  const binary = records.some(record => isBinarySebum(record.metrics[1]));
-  return `<div class="chart-legend">${METRICS.filter(m => !(binary && m.id === 'sebum')).map(m => `<span><i style="background:${m.color}"></i>${metricName(records[0].metrics.find(metric => metric.id === m.id))}</span>`).join('')}</div>`;
-}
-function lineChart(range) {
-  const records = graphRecords(range);
-  if (!records.length) return '<p class="chart-empty">선택한 기간에 비교할 수 있는 기록이 없어요. 다른 달이나 최근 1주를 선택해 보세요.</p>';
-  const days = [...new Set(records.map(r => r.date))];
-  const start = Date.parse(`${days[0]}T00:00:00Z`), span = Date.parse(`${days.at(-1)}T00:00:00Z`) - start;
-  const xFor = date => span ? 65 + (Date.parse(`${date}T00:00:00Z`) - start) / span * 415 : 270;
-  const points = records.map(record => ({ x: xFor(record.date), record }));
-  const lines = METRICS.map((m, i) => {
-    const segments = [];
-    let segment = [];
-    const circles = [];
-    points.forEach(p => {
-      const metric = p.record.metrics[i];
-      const grade = isBinarySebum(metric) ? null : metricGrade(metric);
-      if (grade === null) { if (segment.length) segments.push(segment); segment = []; return; }
-      const y = 140 - grade * 55;
-      segment.push(`${p.x},${y}`);
-      circles.push(`<circle cx="${p.x}" cy="${y}" r="4" fill="white" stroke="${m.color}" stroke-width="2"><title>${p.record.date} ${metricName(p.record.metrics[i])} ${escapeHTML(metricLabel(p.record.metrics[i]))}</title></circle>`);
-    });
-    if (segment.length) segments.push(segment);
-    return segments.filter(values => values.length > 1).map(values => `<polyline points="${values.join(' ')}" stroke="${m.color}" stroke-width="2" fill="none"/>`).join('') + circles.join('');
-  }).join('');
-  const labels = days.filter((_, i) => !i || i === days.length - 1 || i % Math.ceil(days.length / 5) === 0);
-  return `<svg class="chart" data-severity-chart viewBox="0 0 520 180" role="img" aria-label="기록별 정상, 중간 등급, 중증 분석 등급 그래프"><path d="M64 30H495M64 85H495M64 140H495" stroke="#dddeda" stroke-dasharray="3 4" fill="none"/><text x="55" y="34" text-anchor="end">중증</text><text x="55" y="89" text-anchor="end">중간 등급</text><text x="55" y="144" text-anchor="end">정상</text>${lines}${labels.map(d => `<text x="${xFor(d)}" y="169" text-anchor="middle">${d.slice(5).replace('-', '.')}</text>`).join('')}</svg>`;
-}
-function sebumPresenceChart(range) {
-  const records = graphRecords(range).filter(record => isBinarySebum(record.metrics[1]));
-  if (!records.length) return '';
-  const days = [...new Set(records.map(record => record.date))];
-  const start = Date.parse(`${days[0]}T00:00:00Z`), span = Date.parse(`${days.at(-1)}T00:00:00Z`) - start;
-  const xFor = date => span ? 65 + (Date.parse(`${date}T00:00:00Z`) - start) / span * 415 : 270;
-  const points = records.map(record => ({ record, grade: metricGrade(record.metrics[1]), x: xFor(record.date) })).filter(point => point.grade !== null);
-  const color = METRICS[1].color;
-  const labels = days.filter((_, index) => !index || index === days.length - 1 || index % Math.ceil(days.length / 5) === 0);
-  return `<section class="sebum-history-chart"><h3>피지 유무의 변화</h3><p class="chart-footnote">피지 유무는 별도의 두 단계로 비교해요. 유는 심한 정도를 나타내는 등급이 아니에요.</p><svg class="chart sebum-presence-chart" data-sebum-chart viewBox="0 0 520 160" role="img" aria-label="피지 유무 기록 그래프"><path d="M64 40H495M64 110H495" stroke="#dddeda" stroke-dasharray="3 4" fill="none"/><text x="55" y="44" text-anchor="end">유</text><text x="55" y="114" text-anchor="end">무</text>${points.length > 1 ? `<polyline points="${points.map(point => `${point.x},${110 - point.grade * 70}`).join(' ')}" stroke="${color}" stroke-width="2" fill="none"/>` : ''}${points.map(point => `<circle cx="${point.x}" cy="${110 - point.grade * 70}" r="4" fill="white" stroke="${color}" stroke-width="2"><title>${point.record.date} 피지 ${escapeHTML(metricLabel(point.record.metrics[1]))}</title></circle>`).join('')}${labels.map(date => `<text x="${xFor(date)}" y="144" text-anchor="middle">${date.slice(5).replace('-', '.')}</text>`).join('')}</svg></section>`;
-}
 function calendar() {
   const first = new Date(state.year, state.month, 1).getDay(), days = new Date(state.year, state.month + 1, 0).getDate();
   const dates = new Set(readRecords().map(record => record.date)), month = careMonthKey();
@@ -313,7 +271,7 @@ function history() {
   if (state.authLoading || state.recordsLoading) return `${header}<section class="surface empty-state" role="status"><h2>내 기록을 불러오고 있어요</h2></section>`;
   if (state.authUnavailable) return `${header}${accountDataError('account')}`;
   if (state.user && state.recordsError) return `${header}${accountDataError('records')}`;
-  return `${header}${accountContext()}<div class="history-stats"><div class="stat-item"><span>저장한 분석</span><strong>${records.length}<small>회</small></strong></div><div class="stat-item"><span>살펴본 사진</span><strong>${records.reduce((sum,record)=>sum+record.photo_count,0)}<small>장</small></strong></div><div class="stat-item"><span>선택한 달의 관리 실천</span><strong>${state.careMonth === careMonthKey() ? Object.values(state.careDays).filter(checks=>checks.length>0).length : 0}<small>일</small></strong></div></div><div class="history-layout"><section class="surface">${calendar()}</section><section class="surface history-list"><div class="surface-heading"><div><p class="section-kicker">선택한 날짜</p><h2>${shortDate(state.selectedDate)}</h2></div></div>${selected.map(record => `<article class="history-record"><div class="record-date"><strong>두피 사진 분석</strong><span>사진 ${record.photo_count}장</span></div>${legacyAnalysisNotice(record,true)}<div class="record-metrics">${record.metrics.map(metric=>`<span>${metricName(metric)}<strong>${escapeHTML(metricLabel(metric))}</strong></span>`).join('')}</div><div class="record-actions"><button class="button secondary" data-record="${escapeHTML(record.id)}">결과 다시 보기${icon('arrow')}</button></div></article>`).join('') || `<div class="history-empty"><h3>이날 저장한 분석 결과가 없어요</h3><p>아래 체크리스트에는 분석 여부와 관계없이 실천한 관리를 남길 수 있어요.</p>${button('사진 분석하러 가기','start',true)}</div>`}</section></div>${historyCareSection()}${records.length ? `<details class="details-panel" data-details="history-chart"><summary><span>분석 등급의 변화 살펴보기</span><span>항목에 맞는 판정 기준으로 비교해요</span></summary><div class="details-content"><p class="chart-footnote">같은 부위를 비슷한 조명에서 촬영한 기록을 비교해요. 각질의 중간 등급은 경중등도이며 피지 무·유는 별도 그래프로 보여줘요. 그래프만으로 호전·악화를 단정하지 마세요.</p><div class="tabs" aria-label="그래프 기간"><button data-range="week" class="${state.range==='week'?'selected':''}" aria-pressed="${state.range==='week'}">최근 1주</button><button data-range="month" class="${state.range==='month'?'selected':''}" aria-pressed="${state.range==='month'}">선택한 달</button></div>${legend()}${lineChart(state.range)}${sebumPresenceChart(state.range)}</div></details>` : ''}<div class="bottom-actions"><p class="save-note">${recordStorageCopy()} 관리 실천 기록은 분석 결과를 삭제해도 유지돼요.</p>${records.length ? `<button class="text-button" data-action="clear-records" ${state.deleting?'disabled':''}>${state.deleting?'기록을 삭제하고 있어요':'저장한 분석 기록 모두 삭제'}</button>` : ''}</div>`;
+  return `${header}${accountContext()}<div class="history-stats"><div class="stat-item"><span>저장한 분석</span><strong>${records.length}<small>회</small></strong></div><div class="stat-item"><span>살펴본 사진</span><strong>${records.reduce((sum,record)=>sum+record.photo_count,0)}<small>장</small></strong></div><div class="stat-item"><span>선택한 달의 관리 실천</span><strong>${state.careMonth === careMonthKey() ? Object.values(state.careDays).filter(checks=>checks.length>0).length : 0}<small>일</small></strong></div></div><div class="history-layout"><section class="surface">${calendar()}</section><section class="surface history-list"><div class="surface-heading"><div><p class="section-kicker">선택한 날짜</p><h2>${shortDate(state.selectedDate)}</h2></div></div>${selected.map(record => `<article class="history-record"><div class="record-date"><strong>두피 사진 분석</strong><span>사진 ${record.photo_count}장</span></div>${legacyAnalysisNotice(record,true)}<div class="record-metrics">${record.metrics.map(metric=>`<span>${metricName(metric)}<strong>${escapeHTML(metricLabel(metric))}</strong></span>`).join('')}</div><div class="record-actions"><button class="button secondary" data-record="${escapeHTML(record.id)}">결과 다시 보기${icon('arrow')}</button></div></article>`).join('') || `<div class="history-empty"><h3>이날 저장한 분석 결과가 없어요</h3><p>아래 체크리스트에는 분석 여부와 관계없이 실천한 관리를 남길 수 있어요.</p>${button('사진 분석하러 가기','start',true)}</div>`}</section></div>${historyCareSection()}${historyTrendPicker()}<div class="bottom-actions"><p class="save-note">${recordStorageCopy()} 관리 실천 기록은 분석 결과를 삭제해도 유지돼요.</p>${records.length ? `<button class="text-button" data-action="clear-records" ${state.deleting?'disabled':''}>${state.deleting?'기록을 삭제하고 있어요':'저장한 분석 기록 모두 삭제'}</button>` : ''}</div>`;
 }
 function guide() {
   const tips = [
@@ -469,7 +427,7 @@ document.addEventListener('submit', event => {
   if (event.target.matches('[data-auth-form]')) { event.preventDefault(); submitAuth(event.target); }
 });
 
-function currentPage() { const route = location.hash.slice(1) || 'analysis'; return ['analysis', 'report', 'history', 'care', 'guide', 'about', 'login', 'register', 'admin', 'profile'].includes(route) ? route : 'analysis'; }
+function currentPage() { const route = location.hash.slice(1) || 'analysis'; if (METRICS.some(metric => route === `trend/${metric.id}`)) return 'trend'; return ['analysis', 'report', 'history', 'care', 'guide', 'about', 'login', 'register', 'admin', 'profile'].includes(route) ? route : 'analysis'; }
 function focusContent(selector = 'h1') { requestAnimationFrame(() => $('#main').querySelector(selector)?.focus({ preventScroll: true })); }
 function render(focus = false) {
   const page = currentPage();
@@ -485,9 +443,9 @@ function render(focus = false) {
   const focusAction = focused?.dataset?.action;
   const focusData = ['date', 'range', 'record'].map(key => [key, focused?.dataset?.[key]]).find(([, value]) => value !== undefined);
   const scrollY = window.scrollY;
-  $$('[data-nav]').forEach(link => { const active = link.dataset.nav === page || (page === 'report' && link.dataset.nav === 'analysis'); link.classList.toggle('active', active); if (active) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current'); });
+  $$('[data-nav]').forEach(link => { const active = link.dataset.nav === page || (page === 'report' && link.dataset.nav === 'analysis') || (page === 'trend' && link.dataset.nav === 'history'); link.classList.toggle('active', active); if (active) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current'); });
   renderAccountMenu();
-  $('#main').innerHTML = ({ analysis, report, history, care, guide, about, profile: profilePage, admin: adminPage, login: () => authPage('login'), register: () => authPage('register') })[page]();
+  $('#main').innerHTML = ({ analysis, report, history, trend: trendsPage, care, guide, about, profile: profilePage, admin: adminPage, login: () => authPage('login'), register: () => authPage('register') })[page]();
   $('#main').dataset.page = page;
   restoreMemberDraft(authDraft);
   const camera = $('[data-scalp-camera]');
@@ -496,7 +454,7 @@ function render(focus = false) {
   if (page === 'history') ensureCareLoaded();
   if (page === 'admin') ensureAdminLoaded();
   opened.forEach(key => { const details = $$('details[data-details]').find(el => el.dataset.details === key); if (details) details.open = true; });
-  document.title = `${{ analysis: '사진 분석', report: '분석 결과', history: '내 기록', care: '맞춤 관리', guide: '촬영 가이드', login: '로그인', register: '회원가입', about: '서비스 소개', admin: '관리자 페이지', profile: '내 계정' }[page]} | 딥러닝 기반 AI 두피 관리 서비스`;
+  document.title = `${page === 'trend' ? `${selectedTrendMetric().name}의 변화` : { analysis: '사진 분석', report: '분석 결과', history: '내 기록', care: '맞춤 관리', guide: '촬영 가이드', login: '로그인', register: '회원가입', about: '서비스 소개', admin: '관리자 페이지', profile: '내 계정' }[page]} | 딥러닝 기반 AI 두피 관리 서비스`;
   $('#server-status').textContent = !CAN_FETCH ? '서비스 주소에서 접속 필요' : state.health.status === 'ready' ? '분석 준비 완료' : state.health.status === 'loading' ? '분석 준비 중' : '연결 확인 필요';
   $('#server-status').dataset.status = state.health.status;
   $('#server-dot').dataset.status = state.health.status;
@@ -628,6 +586,12 @@ function changeMonth(delta) {
   render();
 }
 document.addEventListener('change', event => {
+  if (event.target.matches('[data-trend-month]')) {
+    const value = event.target.value;
+    if (/^\d{4}-(0[1-9]|1[0-2])$/.test(value) && value <= today().slice(0,7) && Number(value.slice(0,4)) >= 1900) { state.range = 'month'; changeMonth((Number(value.slice(0,4))-state.year)*12+Number(value.slice(5,7))-1-state.month); }
+    else render();
+    return;
+  }
   if (event.target.matches('[data-file]')) { state.error = ''; state.uploadNote = ''; readPhoto(event.target.files[0], Number(event.target.dataset.file)); }
   if (event.target.matches('[data-bulk]')) addPhotos(event.target.files);
   if (event.target.matches('[data-care-check]')) toggleCareCheck(event.target);

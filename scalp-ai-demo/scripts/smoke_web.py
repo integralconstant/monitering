@@ -130,7 +130,8 @@ def assert_customer_copy(page):
 
 
 def assert_customer_entry_routes(page, url):
-    for route in ("analysis", "history", "care", "guide", "about", "login", "register"):
+    for route in ("analysis", "history", "care", "guide", "about", "login", "register",
+                  "trend/flakes", "trend/sebum", "trend/hair_loss", "trend/erythema"):
         page.goto(url + "/#" + route)
         page.wait_for_function("!state.authLoading && state.health.status === 'ready'")
         expect(page.locator("#main h1")).to_be_visible()
@@ -350,6 +351,33 @@ def open_details_for(page, selector):
 
 
 
+def open_trend(page, metric_id, *, legacy_sebum=False):
+    """Menu selection opens a dedicated, single-indicator page and exact scale."""
+    page.locator(f'[data-trend-link="{metric_id}"]').first.click()
+    page.wait_for_url(f"**#trend/{metric_id}")
+    expect(page.locator('[data-nav="history"]')).to_have_attribute('aria-current', 'page')
+    expect(page.locator(f'[data-trend-link="{metric_id}"][aria-current="page"]')).to_have_count(1)
+    expect(page.locator('[data-trend-panel]')).to_be_visible()
+    chart = page.locator('[data-trend-chart]')
+    expect(chart).to_have_count(1)
+    expect(chart).to_have_attribute('data-metric-id', metric_id)
+    expect(chart.locator('circle')).to_have_count(1)
+    labels = FLAKES_GRADES if metric_id == 'flakes' else GRADES if metric_id != 'sebum' or legacy_sebum else SEBUM_GRADES
+    for label in labels:
+        expect(chart).to_contain_text(label)
+    expect(page.locator('[data-sebum-chart]')).to_have_count(int(metric_id == 'sebum' and not legacy_sebum))
+    expect(page.locator('[data-severity-chart]')).to_have_count(int(metric_id != 'sebum' or legacy_sebum))
+    assert_grade_presentation(page)
+    assert_customer_copy(page)
+
+
+def back_to_history(page):
+    page.locator('[data-trend-back]').click()
+    page.wait_for_url('**#history')
+    expect(page.locator('[data-history-trends] [data-trend-link]')).to_have_count(4)
+    expect(page.locator('[data-trend-chart]')).to_have_count(0)
+
+
 def assert_pdf_download(page):
     """A real analysis exports a PDF file without opening the print dialog."""
     page.evaluate("() => { window.__smokePrintCalls = 0; window.print = () => { window.__smokePrintCalls += 1; }; }")
@@ -550,8 +578,13 @@ def main():
         persisted = page.evaluate("key => JSON.parse(localStorage.getItem(key))", KEY)
         assert persisted[1] == legacy, "Viewing legacy data must not overwrite its raw values"
         page.locator('[data-nav="history"]').click()
-        expect(page.locator("[data-severity-chart] circle")).to_have_count(4)
-        expect(page.locator("[data-sebum-chart]")).to_have_count(0)
+        expect(page.locator('[data-history-trends] [data-trend-link]')).to_have_count(4)
+        expect(page.locator('[data-trend-chart]')).to_have_count(0)
+        open_trend(page, 'flakes')
+        back_to_history(page)
+        open_trend(page, 'sebum', legacy_sebum=True)
+        back_to_history(page)
+        assert page.evaluate("key => JSON.parse(localStorage.getItem(key))[1]", KEY) == legacy
         page.locator('[data-record="legacy-before-flakes-training-fix"]').click()
         page.evaluate("({key, records}) => localStorage.setItem(key, JSON.stringify(records))",
                       {"key": KEY, "records": saved})
@@ -560,26 +593,40 @@ def main():
         expect(page.locator(".empty-state")).to_have_count(1)
         page.locator('[data-nav="history"]').click()
         expect(page.locator("[data-record]")).to_have_count(1)
-        expect(page.locator("[data-severity-chart] circle")).to_have_count(3)
-        expect(page.locator("[data-sebum-chart] circle")).to_have_count(1)
-        open_details_for(page, '.chart')
-        assert_grade_presentation(page)
-        expect(page.locator('[data-severity-chart]')).to_contain_text("정상")
-        expect(page.locator('[data-severity-chart]')).to_contain_text("중간")
-        expect(page.locator('[data-severity-chart]')).to_contain_text("중증")
-        expect(page.locator('[data-sebum-chart]')).to_contain_text("무")
-        expect(page.locator('[data-sebum-chart]')).to_contain_text("유")
-        assert "피지" not in page.locator("[data-severity-chart]").text_content()
+        expect(page.locator('[data-history-trends] [data-trend-link]')).to_have_count(4)
+        expect(page.locator('[data-trend-chart]')).to_have_count(0)
+        for metric_id in ('flakes', 'sebum', 'hair_loss', 'erythema'):
+            open_trend(page, metric_id)
+            if metric_id == 'flakes':
+                screenshot(page, output, 'trend-flakes-desktop.png')
+            page.reload()
+            expect(page.locator('[data-trend-chart]')).to_have_attribute('data-metric-id', metric_id)
+            expect(page.locator('[data-trend-chart] circle')).to_have_count(1)
+            expect(page.locator('[data-trend-month]')).to_be_visible()
+            back_to_history(page)
+        open_trend(page, 'flakes')
+        month = saved[0]['date'][:7]
+        year, number = map(int, month.split('-'))
+        previous_month = f"{year if number > 1 else year - 1}-{number - 1 if number > 1 else 12:02d}"
+        page.locator('[data-trend-month]').fill(previous_month)
+        page.locator('[data-trend-month]').dispatch_event('change')
+        expect(page.locator('[data-trend-chart]')).to_have_count(0)
+        expect(page.locator('.chart-empty')).to_be_visible()
+        page.locator('[data-trend-month]').fill(month)
+        page.locator('[data-trend-month]').dispatch_event('change')
+        expect(page.locator('[data-trend-chart] circle')).to_have_count(1)
+        back_to_history(page)
         day = page.locator(f'[data-date="{saved[0]["date"]}"]')
         selected_date = day.get_attribute('data-date')
         day.focus()
         page.keyboard.press('Enter')
         expect(page.locator(f'[data-date="{selected_date}"]')).to_be_focused()
-        open_details_for(page, '.chart')
+        open_trend(page, 'flakes')
         page.locator('[data-range="week"]').focus()
         page.keyboard.press('Enter')
         expect(page.locator('[data-range="week"]')).to_be_focused()
         expect(page.locator('[data-range="week"]')).to_have_attribute('aria-pressed', 'true')
+        back_to_history(page)
         page.locator("[data-record]").click()
         expect(page.locator(".metric")).to_have_count(4)
         expect(page.locator(".result-thumbnail")).to_have_count(0)
@@ -589,11 +636,16 @@ def main():
         # Check the real report and the other routes at small, phone, and tablet widths.
         for width in (320, 390, 768):
             page.set_viewport_size({"width": width, "height": 900})
-            for route in ("analysis", "history", "guide", "care", "about"):
+            for route in ("analysis", "history", "guide", "care", "about", "trend/flakes", "trend/sebum", "trend/hair_loss", "trend/erythema"):
                 page.goto(url + f"/?layout={width}-{route}#" + route)
                 page.wait_for_function("document.querySelector('#main').children.length > 0")
-                assert_layout(page, output, width, route)
+                assert_layout(page, output, width, route.replace("/", "-"))
                 assert_customer_copy(page)
+                if route.startswith("trend/"):
+                    expect(page.locator("[data-trend-chart]")).to_have_attribute("data-metric-id", route.split("/")[1])
+                    expect(page.locator("[data-trend-chart] circle")).to_have_count(1)
+                    if width == 390 and route == 'trend/sebum':
+                        screenshot(page, output, 'trend-sebum-mobile.png')
             page.locator('[data-nav="history"]').click()
             page.locator("[data-record]").click()
             expect(page.locator(".metric")).to_have_count(4)
@@ -648,7 +700,7 @@ def main():
         "result": "PASS", "models": 4, "three_photo_ms": result["elapsed_ms"],
         "one_photo_ms": one["elapsed_ms"], "configuration_id": result["configuration_id"],
         "checks": "customer-facing wording across public routes, loading/errors and file entry; training-aligned flakes and binary sebum merging, separate sebum chart, preserved legacy three-grade sebum, restored class zero, legacy records, no displayed percentages, guided steps, keyboard navigation, native picker focus/selection/cancel and failed identity refresh, bulk/drop/remove, preserved photos, no premature upload, real inference, "
-                  "mean aggregation, direct PDF download without print dialog, concrete care products, optional-gender generic guidance, dated practice checklist in history, storage/reload, history, 320/390/768 layouts, API failure/retry, file entry",
+                  "mean aggregation, direct PDF download without print dialog, concrete care products, optional-gender generic guidance, dated practice checklist in history, dedicated per-indicator trend routes/menu/scales/month/week/keyboard/reload, storage/reload, history, 320/390/768 layouts, API failure/retry, file entry",
     }, ensure_ascii=False))
 
 

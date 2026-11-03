@@ -36,6 +36,7 @@
 | [dist/app.js](dist/app.js) | 로그인·가입 화면, `bootstrapAccount()`, `submitAuth()`, `logout()`, `accountRequest()`, 계정 전환 처리 |
 | [dist/member.js](dist/member.js) | 회원정보 수정·아이디 중복 확인·선택 동의 폼 |
 | [dist/member-care.js](dist/member-care.js) | 날짜별 체크·월별 달력·비회원 실천 저장·PDF 다운로드 |
+| [dist/trends.js](dist/trends.js) | 내 기록의 항목별 변화 메뉴·개별 경로·월/최근 1주 조회 |
 | [dist/admin.js](dist/admin.js) | 관리자 화면, 회원 초기화·삭제 확인, 임시 비밀번호 표시, 작업 내역 |
 | [dist/index.html](dist/index.html) | 공통 메뉴·계정 메뉴, 스크립트 연결 |
 | [dist/styles.css](dist/styles.css) | 인증·관리자 화면 스타일과 모바일 배치 |
@@ -311,7 +312,7 @@ X-Scalp-Profile-Version: 0
 
 ### 실천 기록과 PDF
 
-체크리스트는 `#history`에 있으며 오늘·지난 날짜를 선택해 실천을 저장한다. 미래 날짜 쓰기는 서버에서 차단하고 월별 내역은 현재 계정만 반환한다. `careLoadToken`/`careMonthToken`과 계정 세대 번호로 늦은 응답이 다른 날짜·계정·저장 직후의 달력 표시를 덮어쓰지 않도록 한다. 분석 결과만 삭제할 때는 실천 기록을 보존한다.
+체크리스트는 `#history`에 있으며 오늘·지난 날짜를 선택해 실천을 저장한다. 분석 변화 메뉴는 `#trend/flakes`, `#trend/sebum`, `#trend/hair_loss`, `#trend/erythema`로 이동해 선택한 항목만 그린다. 각 화면에 월 선택·최근 1주·내 기록 복귀가 있고, `graphRecords()`의 설정 식별자 경계를 유지한다. 피지 무/유와 이전 3등급은 별도의 곡선·축을 사용한다. 미래 날짜 쓰기는 서버에서 차단하고 월별 내역은 현재 계정만 반환한다. `careLoadToken`/`careMonthToken`과 계정 세대 번호로 늦은 응답이 다른 날짜·계정·저장 직후의 달력 표시를 덮어쓰지 않도록 한다. 분석 결과만 삭제할 때는 실천 기록을 보존한다.
 
 `#care`는 사진 등급·선택 동의한 성별에 따른 안내와 제품 선택 기준을 표시한다. 근거·성분 제안 제한은 [CARE_GUIDANCE.md](CARE_GUIDANCE.md)를 참고한다. 이메일 전송은 구현하지 않았다. 결과 화면은 인쇄 창을 열지 않고 ReportLab으로 한글 PDF를 내려받으며 표시 등급은 원시 확률에서 서버가 다시 계산한다. 사진 원본·확률·비밀번호는 PDF에 넣지 않는다. PDF 내보내기를 결과 저장 서명 인증과 혼동하지 않는다.
 
