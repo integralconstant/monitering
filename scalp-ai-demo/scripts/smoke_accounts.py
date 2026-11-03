@@ -22,6 +22,7 @@ import urllib.request
 from pathlib import Path
 from uuid import uuid4
 from contextlib import closing
+from datetime import date, timedelta
 
 from playwright.sync_api import expect, sync_playwright
 
@@ -52,12 +53,15 @@ def wait_for_server(process, url, logfile):
     raise AssertionError("Isolated server did not load all four models in 180 seconds")
 
 
-def auth_form(page, url, mode, nickname, password, success=True):
+def auth_form(page, url, mode, nickname, password, success=True, gender=None):
     page.goto(url + "/#" + mode)
     expect(page.locator("[data-auth-form]")).to_have_attribute("data-auth-form", mode)
     assert_customer_copy(page)
     page.locator("#auth-nickname").fill(nickname)
     page.locator("#auth-password").fill(password)
+    if mode == "register" and gender is not None:
+        page.locator("#auth-gender-consent").check()
+        page.locator("#auth-gender").select_option(gender)
     with page.expect_response(
         lambda response: response.url.endswith("/api/auth/" + mode)
         and response.request.method == "POST",
@@ -151,6 +155,7 @@ def check_plan_rules(page, result):
 
 def run_flow(url, output):
     nickname, password_a, password_b = "회원검증" + uuid4().hex[:10], "010101", "020202"
+    nickname_b = nickname + "다른회원"
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True, executable_path=browser_executable())
         context = browser.new_context(base_url=url, viewport={"width": 1280, "height": 1000})
@@ -163,8 +168,14 @@ def run_flow(url, output):
         assert TITLE in page.title()
         expect(page.locator(".site-footer")).to_contain_text(TITLE)
 
-        first = auth_form(page, url, "register", nickname, password_a)
-        assert first.get("id") is not None
+        first = auth_form(page, url, "register", nickname, password_a, gender="female")
+        assert first.get("id") is not None and first["gender"] == "female" and first["gender_consent"] is True
+        duplicate = context.request.post("/api/auth/register", data={"nickname": nickname, "password": password_b})
+        assert duplicate.status == 409 and duplicate.json()["code"] == "nickname_taken"
+        availability = context.request.get("/api/auth/nickname", params={"nickname": nickname})
+        assert availability.ok and availability.json()["available"] is False
+        invalid_consent = context.request.post("/api/auth/register", data={"nickname": nickname_b, "password": password_b, "gender": "male"})
+        assert invalid_consent.status == 400
         assert api_records(context) == []
         print("Registered account A; starting real image analysis.", flush=True)
         page.goto(url + "/#analysis")
@@ -216,19 +227,47 @@ def run_flow(url, output):
         screenshot(page, output, "account-report-desktop.png")
 
         page.locator('[data-nav="care"]').click()
+        expect(page.locator("[data-care-check]")).to_have_count(0)
+        assert_customer_copy(page)
+        screenshot(page, output, "account-care-desktop.png")
+        page.locator('[data-nav="history"]').click()
         expect(page.locator("[data-care-check]")).not_to_have_count(0)
         checkbox = page.locator('[data-care-check="gentle-wash"]')
         expect(checkbox).not_to_be_checked()
-        with page.expect_response(
-            lambda response: "/api/care-checks" in response.url and response.request.method == "PUT"
-        ) as pending:
+        with page.expect_response(lambda response: "/api/care-checks" in response.url and response.request.method == "PUT") as pending:
             checkbox.check()
         assert pending.value.ok, pending.value.text()
+        today = page.evaluate("today()")
+        yesterday = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
+        if yesterday[:7] != today[:7]:
+            page.locator('[data-action="prev-month"]').click()
+        page.locator(f'[data-date="{yesterday}"]').click()
+        previous = page.locator('[data-care-check="low-heat"]')
+        expect(previous).to_be_enabled()
+        expect(previous).not_to_be_checked()
+        with page.expect_response(lambda response: "/api/care-checks" in response.url and response.request.method == "PUT") as pending:
+            previous.check()
+        assert pending.value.ok and pending.value.json()["date"] == yesterday, pending.value.text()
+        month = context.request.get("/api/care-checks", params={"month": yesterday[:7]})
+        assert month.ok, month.text()
+        assert next(day for day in month.json()["days"] if day["date"] == yesterday)["checks"] == ["low-heat"]
         page.reload()
+        if yesterday[:7] != today[:7]:
+            page.locator('[data-action="prev-month"]').click()
+        page.locator(f'[data-date="{yesterday}"]').click()
+        expect(page.locator('[data-care-check="low-heat"]')).to_be_checked()
+        expect(page.locator('[data-care-check="gentle-wash"]')).not_to_be_checked()
+        if yesterday[:7] != today[:7]:
+            page.locator('[data-action="next-month"]').click()
+        page.locator(f'[data-date="{today}"]').click()
         expect(page.locator('[data-care-check="gentle-wash"]')).to_be_checked()
+        expect(page.locator('[data-care-check="low-heat"]')).not_to_be_checked()
+        future = (date.fromisoformat(today) + timedelta(days=1)).isoformat()
+        if page.locator(f'[data-date="{future}"]').count():
+            expect(page.locator(f'[data-date="{future}"]')).to_be_disabled()
         assert_customer_copy(page)
-        screenshot(page, output, "account-care-desktop.png")
-        print("Account A record and today's care state persisted after reload.", flush=True)
+        screenshot(page, output, "account-care-calendar.png")
+        print("Account A record and dated calendar care states persisted independently after reload.", flush=True)
 
         logout(page)
         assert context.request.get("/api/records").status == 401
@@ -241,14 +280,14 @@ def run_flow(url, output):
         expect(page.locator("[data-legacy-sebum]")).to_be_visible()
         assert page.evaluate("key => localStorage.getItem(key)", KEY) == guest_json
 
-        # The demo deliberately permits the same nickname with another password.
-        second = auth_form(page, url, "register", nickname, password_b)
+        # New accounts use unique IDs; omitting optional gender stays supported.
+        second = auth_form(page, url, "register", nickname_b, password_b)
+        assert second["gender"] is None and second["gender_consent"] is False
         assert second["id"] != first["id"]
         assert api_records(context) == []
         page.locator('[data-nav="history"]').click()
         expect(page.locator("[data-record]")).to_have_count(0)
-        page.locator('[data-nav="care"]').click()
-        expect(page.locator("[data-care-check]")).to_have_count(0)
+        expect(page.locator("[data-care-check]:checked")).to_have_count(0)
         checks = context.request.get("/api/care-checks?date=" + result["date"])
         assert checks.ok, checks.text()
         assert checks.json()["checks"] == []
@@ -268,18 +307,18 @@ def run_flow(url, output):
         expect(page.locator("[data-record]")).to_have_count(1)
         page.locator("[data-record]").click()
         expect(page.locator(".metric")).to_have_count(4)
-        page.locator('[data-nav="care"]').click()
+        page.locator('[data-nav="history"]').click()
         expect(page.locator('[data-care-check="gentle-wash"]')).to_be_checked()
         assert page.evaluate("key => localStorage.getItem(key)", KEY) == guest_json
 
         # Cookies are shared across tabs. A tab displaying A must not write A's
         # checklist into B when another tab has changed the authenticated account.
         stale = context.new_page()
-        stale.goto(url + "/#care")
+        stale.goto(url + "/#history")
         expect(stale.locator('[data-care-check="gentle-wash"]')).to_be_checked()
         stale.wait_for_function("id => state.user?.id === id", arg=first["id"])
         logout(page)
-        auth_form(page, url, "login", nickname, password_b)
+        auth_form(page, url, "login", nickname_b, password_b)
         with stale.expect_response(
             lambda response: "/api/care-checks" in response.url and response.request.method == "PUT"
         ) as pending:
@@ -289,21 +328,70 @@ def run_flow(url, output):
         assert pending.value.status == 409, pending.value.text()
         assert pending.value.json()["code"] == "account_changed"
         stale.wait_for_function("id => state.user?.id === id && !state.authLoading", arg=second["id"])
-        expect(stale.locator("[data-care-check]")).to_have_count(0)
+        expect(stale.locator("[data-care-check]:checked")).to_have_count(0)
         assert stale.evaluate("state.result === null && state.accountRecords.length === 0")
         check_b = context.request.get("/api/care-checks?date=" + result["date"])
         assert check_b.ok and check_b.json()["checks"] == []
         stale.close()
         logout(page)
         auth_form(page, url, "login", nickname, password_a)
-        page.locator('[data-nav="care"]').click()
+        page.locator('[data-nav="history"]').click()
         expect(page.locator('[data-care-check="gentle-wash"]')).to_be_checked()
         assert len(api_records(context)) == 1
+
+        # Member changes require the current password, rotate credentials and
+        # invalidate other sessions without removing the saved analysis/history.
+        other_session = browser.new_context(base_url=url)
+        logged_in = other_session.request.post("/api/auth/login", data={"nickname": nickname, "password": password_a})
+        assert logged_in.ok, logged_in.text()
+        page.goto(url + "/#profile")
+        expect(page.locator("[data-profile-form]")).to_be_visible()
+        changed_nickname, changed_password = nickname + "수정", "new-sample-only-password"
+        page.locator("#profile-nickname").fill(changed_nickname)
+        page.locator("#profile-current-password").fill("wrong-current-password")
+        page.locator("#profile-new-password").fill(changed_password)
+        page.locator("#profile-confirm-password").fill(changed_password)
+        page.locator("#profile-gender-consent").check()
+        page.locator("#profile-gender").select_option("male")
+        with page.expect_response(lambda response: response.url.endswith("/api/auth/profile") and response.request.method == "PATCH") as pending:
+            page.locator('[data-profile-form] [type="submit"]').click()
+        assert pending.value.status == 403, pending.value.text()
+        assert context.request.get("/api/auth/me").json()["user"]["nickname"] == nickname
+        page.locator("#profile-current-password").fill(password_a)
+        with page.expect_response(lambda response: response.url.endswith("/api/auth/profile") and response.request.method == "PATCH") as pending:
+            page.locator('[data-profile-form] [type="submit"]').click()
+        assert pending.value.ok, pending.value.text()
+        updated = pending.value.json()["user"]
+        assert updated["id"] == first["id"] and updated["gender"] == "male" and updated["profile_version"] > first["profile_version"]
+        expect(page.locator("[data-account-name]")).to_contain_text(changed_nickname)
+        assert other_session.request.get("/api/auth/me").json()["user"] is None
+        assert len(api_records(context)) == 1
+        old_login = other_session.request.post("/api/auth/login", data={"nickname": nickname, "password": password_a})
+        assert old_login.status == 401
+        new_login = other_session.request.post("/api/auth/login", data={"nickname": changed_nickname, "password": changed_password})
+        assert new_login.ok and new_login.json()["user"]["id"] == first["id"]
+        page.goto(url + "/#profile")
+        page.locator("#profile-current-password").fill(changed_password)
+        page.locator("#profile-gender-consent").uncheck()
+        with page.expect_response(lambda response: response.url.endswith("/api/auth/profile") and response.request.method == "PATCH") as pending:
+            page.locator('[data-profile-form] [type="submit"]').click()
+        assert pending.value.ok, pending.value.text()
+        withdrawn = pending.value.json()["user"]
+        assert withdrawn["gender"] is None and withdrawn["gender_consent"] is False
+        page.reload()
+        expect(page.locator("#profile-gender-consent")).not_to_be_checked()
+        expect(page.locator("#profile-gender")).to_be_disabled()
+        assert len(api_records(context)) == 1
+        month = context.request.get("/api/care-checks", params={"month": yesterday[:7]})
+        assert month.ok and any(day["date"] == yesterday and day["checks"] == ["low-heat"] for day in month.json()["days"])
+        screenshot(page, output, "account-profile.png")
+        other_session.close()
+        nickname, password_a = changed_nickname, changed_password
 
         # Shared header and all new routes must fit narrow screens too.
         for width in (320, 390, 768, 1280):
             page.set_viewport_size({"width": width, "height": 900})
-            for route in ("analysis", "history", "care", "guide", "about"):
+            for route in ("analysis", "history", "care", "guide", "about", "profile"):
                 page.goto(url + "/?account-layout=" + str(width) + "-" + route + "#" + route)
                 expect(page.locator("#main h1")).to_be_visible()
                 expect(page.locator("[data-account-name]")).to_contain_text(nickname)
@@ -354,7 +442,11 @@ def main():
                 print(logfile.read_text(encoding="utf-8", errors="replace")[-5000:], file=sys.stderr)
                 raise
             finally:
-                process.terminate()
+                if process.poll() is None:
+                    if os.name == "nt":
+                        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], capture_output=True, timeout=20)
+                    else:
+                        process.terminate()
                 try:
                     process.wait(timeout=15)
                 except subprocess.TimeoutExpired:
@@ -367,9 +459,9 @@ def main():
             assert connection.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 2
         summary = {
             "result": "PASS", **details,
-            "checks": "real inference; Enter registration/login and login errors; duplicate nickname; "
+            "checks": "real inference; Enter registration/login and login errors; unique nickname normalization; optional gender/explicit consent; "
                       "account-owned record save/reload and cross-account isolation; owner-bound proof; "
-                      "daily care persistence and isolation; stale-tab account-change guard; binary sebum and legacy grade-driven plans; preserved guest legacy data; "
+                      "dated calendar care persistence and isolation; current-password profile edit/session revocation/consent withdrawal; stale-tab account-change guard; binary sebum and legacy grade-driven plans; preserved guest legacy data; "
                       "no saved images; title; 320/390/768/1280 layouts; isolated temporary SQLite",
         }
     print(json.dumps(summary, ensure_ascii=False))

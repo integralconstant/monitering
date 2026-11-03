@@ -85,6 +85,9 @@ class UploadApiTests(unittest.TestCase):
         site.close()
         health = self.client.get("/api/health")
         self.assertEqual(health.json["status"], "ready")
+        self.assertEqual(health.json["application"], "scalp-ai-demo")
+        self.assertEqual(health.json["installation_id"], server.installation_id(server.BASE_DIR))
+        self.assertNotIn(str(server.BASE_DIR), health.get_data(as_text=True))
         self.assertEqual(health.headers["Cache-Control"], "no-store")
 
     def test_one_grayscale_image_is_rgb_and_never_spooled_to_disk(self):

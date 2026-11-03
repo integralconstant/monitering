@@ -19,20 +19,31 @@ def main():
     create = commands.add_parser("create", help="관리자 계정 만들기")
     create.add_argument("--nickname", required=True)
     create.add_argument("--generate-password", action="store_true")
+    update = commands.add_parser("update", help="기존 관리자 아이디·비밀번호 변경")
+    update.add_argument("--user-id", required=True, type=int)
+    update.add_argument("--nickname", required=True)
+    update.add_argument("--password-stdin", action="store_true", help="자동화용: 표준 입력 한 줄로 비밀번호 받기")
     args = parser.parse_args()
-    if args.generate_password:
+    generated = args.command == "create" and args.generate_password
+    if args.command == "update" and args.password_stdin:
+        password = sys.stdin.readline().rstrip("\r\n")
+    elif generated:
         password = secrets.token_urlsafe(12)
     else:
         password = getpass.getpass("관리자 비밀번호: ")
         if password != getpass.getpass("관리자 비밀번호 확인: "):
             parser.error("입력한 비밀번호가 서로 다릅니다.")
     try:
-        user = AccountStore(args.database).create_admin(args.nickname, password)
+        store = AccountStore(args.database)
+        if args.command == "create":
+            user = store.create_admin(args.nickname, password)
+        else:
+            user = store.update_admin_credentials(args.user_id, args.nickname, password)
     except AccountError as exc:
         print(str(exc), file=sys.stderr)
         return 1
     result = {"user": user}
-    if args.generate_password:
+    if generated:
         result["temporary_password"] = password
     print(json.dumps(result, ensure_ascii=False))
     return 0

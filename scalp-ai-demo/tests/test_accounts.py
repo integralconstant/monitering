@@ -11,7 +11,8 @@ from pathlib import Path
 
 from PIL import Image
 
-from accounts import COOKIE_NAME, record_payload
+from accounts import AccountStore, COOKIE_NAME, record_payload
+from werkzeug.security import generate_password_hash
 from server import create_app
 
 
@@ -87,15 +88,32 @@ class AccountApiTests(unittest.TestCase):
         self.assertNotEqual(session_hash, self.client.get_cookie(COOKIE_NAME).value)
         self.assertEqual(response.headers["Cache-Control"], "no-store")
 
-    def test_duplicate_nickname_different_password_identifies_correct_account(self):
-        first = self.register().json["user"]
-        second = self.register(password="135790").json["user"]
-        self.assertNotEqual(first["id"], second["id"])
-        self.assertEqual(self.register().status_code, 409)
-        logged_in = self.client.post("/api/auth/login", json={"nickname": "tester", "password": "246810"})
+    def test_duplicate_nickname_is_rejected_after_normalization_without_ui_precheck(self):
+        first = self.register(nickname=" TestUser ").json["user"]
+        for nickname in ("TestUser", "testuser", "ＴｅｓｔＵｓｅｒ"):
+            response = self.register(nickname=nickname, password="135790")
+            self.assertEqual(response.status_code, 409, response.json)
+            self.assertEqual(response.json["code"], "nickname_taken")
+            available = self.client.get("/api/auth/nickname", query_string={"nickname": nickname})
+            self.assertFalse(available.json["available"])
+        self.assertTrue(self.client.get("/api/auth/nickname?nickname=new-name").json["available"])
+        self.assertEqual(self.client.get("/api/auth/nickname?nickname=").status_code, 400)
+        logged_in = self.client.post("/api/auth/login", json={"nickname": "testuser", "password": "246810"})
         self.assertEqual(logged_in.json["user"], first)
-        self.assertEqual(self.client.post("/api/auth/login", json={"nickname": "tester", "password": "wrong"}).status_code, 401)
-        self.assertEqual(self.client.get("/api/auth/me").json["user"], first)
+        self.assertEqual(self.client.post("/api/auth/login", json={"nickname": "TestUser", "password": "wrong"}).status_code, 401)
+
+    def test_historical_duplicate_accounts_keep_access_after_migration(self):
+        first = self.register().json["user"]
+        with self.store.connection() as db:
+            cursor = db.execute("INSERT INTO users(nickname,password_hash,created_at) VALUES (?,?,?)",
+                                ("tester", generate_password_hash("legacy-password"), int(time.time())))
+            second_id = cursor.lastrowid
+        migrated = AccountStore(self.database)
+        self.assertEqual(migrated.login({"nickname": "tester", "password": "246810"})["id"], first["id"])
+        self.assertEqual(migrated.login({"nickname": "tester", "password": "legacy-password"})["id"], second_id)
+        self.assertEqual(self.register(password="new-password").status_code, 409)
+        with migrated.connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM users").fetchone()[0], 2)
 
     def test_logout_revokes_replayed_cookie_and_expired_sessions(self):
         self.register()
@@ -111,6 +129,8 @@ class AccountApiTests(unittest.TestCase):
     def test_account_endpoints_require_login(self):
         for method, path, body in [
             ("get", "/api/records", None), ("post", "/api/records", {}), ("delete", "/api/records", None),
+            ("get", "/api/auth/profile", None), ("patch", "/api/auth/profile", {"current_password": "secret"}),
+            ("get", "/api/care-checks?month=2026-11", None),
             ("get", "/api/care-checks?date=2026-11-01", None), ("put", "/api/care-checks", {"date": "2026-11-01", "checks": []}),
         ]:
             response = getattr(self.client, method)(path, **({"json": body} if body is not None else {}))
@@ -245,6 +265,101 @@ class AccountApiTests(unittest.TestCase):
         self.client.post("/api/auth/logout", json={})
         self.assertEqual(self.client.get("/api/records", headers=stale_header).status_code, 409)
         self.assertEqual(self.client.post("/api/analyze", data={}, headers={"X-Scalp-Account": "guest"}).status_code, 400)
+
+    def test_signup_gender_requires_consent_and_remains_optional(self):
+        guest = self.client.get("/api/auth/me")
+        self.assertIsNone(guest.json["user"])
+        response = self.client.post("/api/auth/register", json={"nickname": "male-user", "password": "new-only-password", "gender": "male", "gender_consent": True})
+        self.assertEqual(response.status_code, 201, response.json)
+        user = response.json["user"]
+        self.assertEqual(user["gender"], "male")
+        self.assertIs(user["gender_consent"], True)
+        self.assertEqual(user["profile_version"], 0)
+        self.assertNotIn("password", user)
+        with self.store.connection() as db:
+            row = db.execute("SELECT gender_consented_at,gender_consent_version FROM users WHERE id=?", (user["id"],)).fetchone()
+        self.assertIsInstance(row["gender_consented_at"], int)
+        self.assertEqual(row["gender_consent_version"], "2026-11-03")
+        for fields in ({"gender": "female"}, {"gender": "unknown", "gender_consent": True},
+                       {"gender": "female", "gender_consent": "true"}, {"gender_consent": True}):
+            invalid = self.client.post("/api/auth/register", json={"nickname": "rejected", "password": "fresh-password", **fields})
+            self.assertEqual(invalid.status_code, 400, invalid.json)
+        optional = self.register(nickname="no-gender").json["user"]
+        self.assertIsNone(optional["gender"])
+        self.assertIs(optional["gender_consent"], False)
+
+    def test_profile_update_rotates_sessions_preserves_records_and_revokes_old_proof(self):
+        user = self.register().json["user"]
+        result = self.analyze()
+        self.save(result)
+        self.client.put("/api/care-checks", json={"date": "2026-11-01", "checks": ["observe"]})
+        other_session = self.app.test_client()
+        other_session.post("/api/auth/login", json={"nickname": "tester", "password": "246810"})
+        previous_token = self.client.get_cookie(COOKIE_NAME).value
+        response = self.client.patch("/api/auth/profile", json={"current_password": "246810", "nickname": "changed-user", "new_password": "new-login-only", "gender": "female", "gender_consent": True})
+        self.assertEqual(response.status_code, 200, response.json)
+        changed = response.json["user"]
+        self.assertEqual(changed["id"], user["id"])
+        self.assertEqual(changed["nickname"], "changed-user")
+        self.assertEqual(changed["gender"], "female")
+        self.assertEqual(changed["profile_version"], 1)
+        self.assertEqual(changed["result_epoch"], user["result_epoch"] + 1)
+        self.assertNotEqual(self.client.get_cookie(COOKIE_NAME).value, previous_token)
+        self.assertEqual(self.client.get("/api/auth/me").json["user"], changed)
+        self.assertIsNone(other_session.get("/api/auth/me").json["user"])
+        self.assertEqual(len(self.client.get("/api/records").json["records"]), 1)
+        self.assertEqual(self.client.get("/api/care-checks?date=2026-11-01").json["checks"], ["observe"])
+        self.assertEqual(self.save(result).status_code, 403)
+        self.assertEqual(self.client.post("/api/auth/login", json={"nickname": "tester", "password": "246810"}).status_code, 401)
+        self.assertEqual(self.client.post("/api/auth/login", json={"nickname": "changed-user", "password": "new-login-only"}).status_code, 200)
+        stale = self.client.get("/api/care-checks?month=2026-11", headers={"X-Scalp-Profile-Version": "0"})
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(stale.json["code"], "profile_changed")
+
+    def test_profile_mutation_requires_current_password_and_cannot_target_other_user(self):
+        user = self.register().json["user"]
+        other = self.app.test_client()
+        second = self.register(nickname="second", client=other).json["user"]
+        for fields in ({}, {"current_password": "wrong"}, {"current_password": "246810", "new_password": ""}):
+            response = self.client.patch("/api/auth/profile", json={"nickname": "changed", **fields})
+            self.assertIn(response.status_code, (400, 403))
+        duplicate = self.client.patch("/api/auth/profile", json={"current_password": "246810", "nickname": "SECOND"})
+        self.assertEqual(duplicate.status_code, 409)
+        self.assertEqual(self.client.get("/api/auth/me").json["user"], user)
+        response = self.client.patch("/api/auth/profile", json={"current_password": "246810", "user_id": second["id"], "role": "admin", "nickname": "new-own-name"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["user"]["id"], user["id"])
+        self.assertEqual(response.json["user"]["role"], "user")
+        self.assertEqual(other.get("/api/auth/me").json["user"], second)
+        self.assertEqual(self.client.patch("/api/auth/profile", json={"current_password": "246810"}, headers={"Origin": "https://foreign.example"}).status_code, 403)
+        self.assertEqual(self.client.patch("/api/auth/profile", data="raw").status_code, 415)
+
+    def test_profile_consent_withdrawal_removes_gender_and_consent_metadata(self):
+        response = self.client.post("/api/auth/register", json={"nickname": "consent-user", "password": "own-password", "gender": "male", "gender_consent": True})
+        user_id = response.json["user"]["id"]
+        response = self.client.patch("/api/auth/profile", json={"current_password": "own-password", "gender_consent": False})
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertIsNone(response.json["user"]["gender"])
+        self.assertIs(response.json["user"]["gender_consent"], False)
+        with self.store.connection() as db:
+            row = db.execute("SELECT gender,gender_consent,gender_consented_at,gender_consent_version FROM users WHERE id=?", (user_id,)).fetchone()
+        self.assertEqual(tuple(row), (None, 0, None, None))
+
+    def test_care_month_is_sorted_owner_scoped_and_future_writes_are_rejected(self):
+        self.register()
+        self.client.put("/api/care-checks", json={"date": "2026-11-02", "checks": ["low-heat"]})
+        self.client.put("/api/care-checks", json={"date": "2026-10-31", "checks": ["gentle-wash"]})
+        self.client.put("/api/care-checks", json={"date": "2026-11-01", "checks": []})
+        response = self.client.get("/api/care-checks?month=2026-11")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json, {"month": "2026-11", "days": [{"date": "2026-11-01", "checks": []}, {"date": "2026-11-02", "checks": ["low-heat"]}]})
+        other = self.app.test_client()
+        self.register(nickname="other", client=other)
+        self.assertEqual(other.get("/api/care-checks?month=2026-11").json["days"], [])
+        for query in ("2026-1", "2026-13", "abcd", "2026-11&date=2026-11-01"):
+            self.assertEqual(self.client.get("/api/care-checks?month=" + query).status_code, 400)
+        self.assertEqual(self.client.put("/api/care-checks", json={"date": "9999-01-01", "checks": ["observe"]}).status_code, 400)
+        self.assertEqual(self.client.get("/api/care-checks?date=9999-01-01").json["checks"], [])
 
     def test_json_and_same_origin_mutation_boundaries(self):
         self.assertEqual(self.client.post("/api/auth/register", data={"nickname": "test", "password": "1"}).status_code, 415)

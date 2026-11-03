@@ -8,14 +8,18 @@ import json
 import secrets
 import sqlite3
 import time
+import unicodedata
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
 SESSION_SECONDS = 7 * 24 * 60 * 60
 COOKIE_NAME = "scalp_session"
+GENDER_CONSENT_VERSION = "2026-11-03"
+PUBLIC_USER_FIELDS = ("id", "nickname", "role", "result_epoch", "gender", "gender_consent", "profile_version")
 CHECK_IDS = frozenset({"gentle-wash", "low-heat", "observe", "flakes-care", "sebum-care", "hair-care", "redness-care"})
 METRIC_IDS = ("flakes", "sebum", "hair_loss", "erythema")
 RECORD_FIELDS = ("id", "date", "source", "photo_count", "aggregation", "settings_verified", "warnings", "metrics", "per_photo", "elapsed_ms", "configuration_id")
@@ -128,6 +132,23 @@ class AccountStore:
                 db.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('user','admin'))")
             if "result_epoch" not in columns:
                 db.execute("ALTER TABLE users ADD COLUMN result_epoch INTEGER NOT NULL DEFAULT 0")
+            additions = {
+                "nickname_key": "TEXT",
+                "gender": "TEXT CHECK(gender IN ('male','female') OR gender IS NULL)",
+                "gender_consent": "INTEGER NOT NULL DEFAULT 0 CHECK(gender_consent IN (0,1))",
+                "gender_consented_at": "INTEGER",
+                "gender_consent_version": "TEXT",
+                "profile_version": "INTEGER NOT NULL DEFAULT 0",
+            }
+            for name, definition in additions.items():
+                if name not in columns:
+                    db.execute(f"ALTER TABLE users ADD COLUMN {name} {definition}")
+            for row in db.execute("SELECT id,nickname FROM users WHERE nickname_key IS NULL OR nickname_key='' ").fetchall():
+                db.execute("UPDATE users SET nickname_key=? WHERE id=?", (self.nickname_key(row["nickname"]), row["id"]))
+            # Historical duplicates keep their IDs and data. New writes are
+            # serialized and reject a matching normalized key, even if a caller
+            # bypasses the UI availability check.
+            db.execute("CREATE INDEX IF NOT EXISTS users_nickname_key ON users(nickname_key)")
             db.execute("INSERT OR IGNORE INTO metadata(key,value) VALUES ('signing_secret',?)", (secrets.token_hex(32),))
             self.signing_secret = db.execute("SELECT value FROM metadata WHERE key='signing_secret'").fetchone()[0].encode()
 
@@ -143,13 +164,60 @@ class AccountStore:
             db.close()
 
     @staticmethod
-    def credentials(body):
-        nickname, password = body.get("nickname"), body.get("password")
-        if not isinstance(nickname, str) or not 1 <= len(nickname.strip()) <= 40:
-            raise AccountError("닉네임을 1~40자로 입력해 주세요.")
+    def nickname_key(nickname):
+        return unicodedata.normalize("NFKC", nickname.strip()).casefold()
+
+    @classmethod
+    def nickname_value(cls, nickname):
+        if (not isinstance(nickname, str) or not 1 <= len(nickname.strip()) <= 40
+                or any(unicodedata.category(character).startswith("C") for character in nickname)):
+            raise AccountError("아이디를 1~40자로 입력해 주세요.")
+        return nickname.strip()
+
+    @classmethod
+    def credentials(cls, body):
+        nickname, password = cls.nickname_value(body.get("nickname")), body.get("password")
         if not isinstance(password, str) or not 1 <= len(password) <= 128:
             raise AccountError("비밀번호를 1~128자로 입력해 주세요.")
-        return nickname.strip(), password
+        return nickname, password
+
+    @staticmethod
+    def gender_details(body, previous=None):
+        previous = dict(previous) if previous is not None else {}
+        gender = body.get("gender", previous.get("gender"))
+        consent = body.get("gender_consent", bool(previous.get("gender_consent", False)))
+        if gender not in (None, "male", "female") or type(consent) is not bool:
+            raise AccountError("성별 선택과 정보 활용 동의 여부를 확인해 주세요.")
+        if not consent:
+            if "gender" in body and gender is not None:
+                raise AccountError("성별 정보 활용에 동의하거나 성별 선택을 해제해 주세요.")
+            return None, False
+        if gender is None:
+            raise AccountError("정보 활용에 동의하려면 성별을 선택해 주세요.")
+        return gender, True
+
+    @staticmethod
+    def public_user(row):
+        if row is None:
+            return None
+        result = {key: row[key] for key in PUBLIC_USER_FIELDS}
+        result["gender_consent"] = bool(result["gender_consent"])
+        if not result["gender_consent"]:
+            result["gender"] = None
+        return result
+
+    def nickname_available(self, nickname):
+        nickname = self.nickname_value(nickname)
+        with self.connection() as db:
+            exists = db.execute("SELECT 1 FROM users WHERE nickname_key=? LIMIT 1", (self.nickname_key(nickname),)).fetchone()
+        return {"nickname": nickname, "available": exists is None}
+
+    @classmethod
+    def _unique_nickname(cls, db, nickname, exclude_id=None):
+        duplicate = db.execute("SELECT 1 FROM users WHERE nickname_key=? AND id!=? LIMIT 1",
+                               (cls.nickname_key(nickname), exclude_id if exclude_id is not None else -1)).fetchone()
+        if duplicate:
+            raise AccountError("이미 사용 중인 아이디예요. 다른 아이디를 입력해 주세요.", 409, "nickname_taken")
 
     def register(self, body):
         # Public signup always creates an ordinary account, regardless of input.
@@ -161,14 +229,16 @@ class AccountStore:
 
     def _create_user(self, body, role):
         nickname, password = self.credentials(body)
+        gender, consent = self.gender_details(body)
         password_hash = generate_password_hash(password)
+        now = int(time.time())
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
-            candidates = db.execute("SELECT password_hash FROM users WHERE nickname=?", (nickname,)).fetchall()
-            if any(check_password_hash(row["password_hash"], password) for row in candidates):
-                raise AccountError("이미 등록된 로그인 정보예요. 로그인해 주세요.", 409)
-            cursor = db.execute("INSERT INTO users(nickname,password_hash,created_at,role) VALUES (?,?,?,?)", (nickname, password_hash, int(time.time()), role))
-            user = {"id": cursor.lastrowid, "nickname": nickname, "role": role, "result_epoch": 0}
+            self._unique_nickname(db, nickname)
+            cursor = db.execute("INSERT INTO users(nickname,nickname_key,password_hash,created_at,role,gender,gender_consent,gender_consented_at,gender_consent_version) VALUES (?,?,?,?,?,?,?,?,?)",
+                                (nickname, self.nickname_key(nickname), password_hash, now, role, gender, int(consent),
+                                 now if consent else None, GENDER_CONSENT_VERSION if consent else None))
+            user = self.public_user(db.execute("SELECT * FROM users WHERE id=?", (cursor.lastrowid,)).fetchone())
             if role == "admin":
                 self._audit(db, user, user, "admin_created", {})
             return user
@@ -176,11 +246,71 @@ class AccountStore:
     def login(self, body):
         nickname, password = self.credentials(body)
         with self.connection() as db:
-            candidates = db.execute("SELECT id,nickname,password_hash,role,result_epoch FROM users WHERE nickname=? ORDER BY id", (nickname,)).fetchall()
+            candidates = db.execute("SELECT * FROM users WHERE nickname_key=? ORDER BY (nickname=?) DESC,id",
+                                    (self.nickname_key(nickname), nickname)).fetchall()
+        # Historical duplicate accounts remain accessible by their original
+        # credentials; normalization never merges or deletes their records.
         for row in candidates:
             if check_password_hash(row["password_hash"], password):
-                return {key: row[key] for key in ("id", "nickname", "role", "result_epoch")}
-        raise AccountError("닉네임과 비밀번호를 다시 확인해 주세요.", 401)
+                return self.public_user(row)
+        raise AccountError("아이디와 비밀번호를 다시 확인해 주세요.", 401)
+
+    def profile(self, user_id):
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        if row is None:
+            raise AccountError("로그인 후 이용해 주세요.", 401)
+        return self.public_user(row)
+
+    def update_profile(self, user_id, body, result_epoch=None):
+        current_password = body.get("current_password")
+        if not isinstance(current_password, str) or not 1 <= len(current_password) <= 128:
+            raise AccountError("회원정보를 수정하려면 현재 비밀번호를 입력해 주세요.")
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._check_epoch(db, user_id, result_epoch)
+            row = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            if row["role"] != "user":
+                raise AccountError("관리자 계정 정보는 로컬 운영 도구에서 변경해 주세요.", 403)
+            if not check_password_hash(row["password_hash"], current_password):
+                raise AccountError("현재 비밀번호가 맞지 않아요. 다시 확인해 주세요.", 403, "password_mismatch")
+            nickname = self.nickname_value(body.get("nickname", row["nickname"]))
+            if nickname != row["nickname"]:
+                self._unique_nickname(db, nickname, user_id)
+            gender, consent = self.gender_details(body, row)
+            password_hash = row["password_hash"]
+            password_changed = False
+            if "new_password" in body:
+                new_password = body["new_password"]
+                if not isinstance(new_password, str) or not 1 <= len(new_password) <= 128:
+                    raise AccountError("새 비밀번호를 1~128자로 입력해 주세요.")
+                if not check_password_hash(password_hash, new_password):
+                    password_hash = generate_password_hash(new_password)
+                    password_changed = True
+            changed = nickname != row["nickname"] or gender != row["gender"] or consent != bool(row["gender_consent"]) or password_changed
+            if changed:
+                consent_changed = gender != row["gender"] or consent != bool(row["gender_consent"])
+                consent_at = (int(time.time()) if consent else None) if consent_changed else row["gender_consented_at"]
+                consent_version = (GENDER_CONSENT_VERSION if consent else None) if consent_changed else row["gender_consent_version"]
+                db.execute("UPDATE users SET nickname=?,nickname_key=?,password_hash=?,gender=?,gender_consent=?,gender_consented_at=?,gender_consent_version=?,profile_version=profile_version+1,result_epoch=result_epoch+1 WHERE id=?",
+                           (nickname, self.nickname_key(nickname), password_hash, gender, int(consent), consent_at, consent_version, user_id))
+                db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+            return self.public_user(db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone())
+
+    def update_admin_credentials(self, user_id, nickname, password):
+        """Local operator maintenance; never exposed through a web route."""
+        nickname, password = self.credentials({"nickname": nickname, "password": password})
+        password_hash = generate_password_hash(password)
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            actor = self._require_admin(db, user_id)
+            self._unique_nickname(db, nickname, user_id)
+            db.execute("UPDATE users SET nickname=?,nickname_key=?,password_hash=?,result_epoch=result_epoch+1,profile_version=profile_version+1 WHERE id=?",
+                       (nickname, self.nickname_key(nickname), password_hash, user_id))
+            revoked = db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,)).rowcount
+            user = self.public_user(db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone())
+            self._audit(db, actor, user, "admin_credentials_updated", {"revoked_sessions": revoked})
+            return user
 
     def new_session(self, user_id, old_token=None, result_epoch=None):
         token = secrets.token_urlsafe(32)
@@ -201,8 +331,8 @@ class AccountStore:
         if not token or len(token) > 200:
             return None
         with self.connection() as db:
-            row = db.execute("SELECT users.id,users.nickname,users.role,users.result_epoch FROM sessions JOIN users ON users.id=sessions.user_id WHERE sessions.token_hash=? AND sessions.expires_at>?", (self.token_hash(token), int(time.time()))).fetchone()
-        return dict(row) if row else None
+            row = db.execute("SELECT users.* FROM sessions JOIN users ON users.id=sessions.user_id WHERE sessions.token_hash=? AND sessions.expires_at>?", (self.token_hash(token), int(time.time()))).fetchone()
+        return self.public_user(row)
 
     def logout(self, token):
         if token:
@@ -275,6 +405,8 @@ class AccountStore:
     def care_checks(self, user_id, check_date, checks=None, result_epoch=None):
         if not valid_date(check_date):
             raise AccountError("관리 기록의 날짜를 확인해 주세요.")
+        if checks is not None and check_date > datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat():
+            raise AccountError("미래 날짜에는 관리 실천을 기록할 수 없어요.")
         if checks is not None and (not isinstance(checks, list) or len(checks) > len(CHECK_IDS)
                                   or any(not isinstance(item, str) or item not in CHECK_IDS for item in checks)
                                   or len(set(checks)) != len(checks)):
@@ -286,6 +418,16 @@ class AccountStore:
                 db.execute("INSERT INTO care_checks(user_id,check_date,checks) VALUES (?,?,?) ON CONFLICT(user_id,check_date) DO UPDATE SET checks=excluded.checks", (user_id, check_date, json.dumps(sorted(checks))))
             row = db.execute("SELECT checks FROM care_checks WHERE user_id=? AND check_date=?", (user_id, check_date)).fetchone()
         return {"date": check_date, "checks": json.loads(row[0]) if row else []}
+
+    def care_month(self, user_id, month, result_epoch=None):
+        if not isinstance(month, str) or len(month) != 7 or not valid_date(month + "-01"):
+            raise AccountError("조회할 월을 YYYY-MM 형식으로 선택해 주세요.")
+        with self.connection() as db:
+            db.execute("BEGIN")
+            self._check_epoch(db, user_id, result_epoch)
+            rows = db.execute("SELECT check_date,checks FROM care_checks WHERE user_id=? AND check_date>=? AND check_date<=? ORDER BY check_date",
+                              (user_id, month + "-01", month + "-31")).fetchall()
+        return {"month": month, "days": [{"date": row["check_date"], "checks": json.loads(row["checks"])} for row in rows]}
 
     @staticmethod
     def _require_admin(db, actor_id):
@@ -342,7 +484,7 @@ class AccountStore:
             db.execute("BEGIN IMMEDIATE")
             actor = self._require_admin(db, actor_id)
             target = self._member_target(db, target_id)
-            existing_hashes = [row[0] for row in db.execute("SELECT password_hash FROM users WHERE nickname=?", (target["nickname"],))]
+            existing_hashes = [row[0] for row in db.execute("SELECT password_hash FROM users WHERE nickname_key=?", (self.nickname_key(target["nickname"]),))]
             for _ in range(20):
                 temporary = f"{secrets.randbelow(100_000_000):08d}"
                 if not any(check_password_hash(value, temporary) for value in existing_hashes):

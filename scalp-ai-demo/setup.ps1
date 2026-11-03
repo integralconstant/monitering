@@ -11,5 +11,5 @@ try {
     $requirementsFile = if ($WithBrowserTests) { 'requirements-dev.txt' } else { 'requirements.txt' }
     & '.\.venv\Scripts\python.exe' -m pip install -r $requirementsFile
     if ($LASTEXITCODE -ne 0) { throw '웹 서버 의존성 설치에 실패했습니다.' }
-    Write-Output 'Setup complete. Run .\start.ps1 and open http://127.0.0.1:8000'
+    Write-Output '설치가 완료됐어요. start.cmd를 더블클릭하면 웹이 자동으로 열립니다.'
 } finally { Pop-Location }

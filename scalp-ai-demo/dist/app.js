@@ -53,6 +53,7 @@ const state = {
   user: null, authLoading: CAN_FETCH, authUnavailable: false, authBusy: false, authError: '', accountEpoch: 0,
   accountRecords: [], recordsLoading: false, recordsError: '', saving: false, deleting: false, saveToken: null,
   careChecks: new Set(), careDate: '', careLoading: false, careSaving: false, careError: '',
+  careMonth: '', careDays: {}, careMonthLoading: false, careMonthError: '', careLoadToken: 0, careMonthToken: 0, pdfBusy: false,
   health: { status: 'loading', message: '', models: [] }
 };
 function escapeHTML(value) { return String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char])); }
@@ -202,7 +203,7 @@ function uploadFeedback() {
   return `<p class="inline-notice error" id="upload-error" role="alert" ${state.error ? '' : 'hidden'}>${escapeHTML(state.error)}</p><p class="upload-summary" role="status">${state.reading.size ? '사진을 확인하고 있어요. 잠시만 기다려 주세요.' : state.uploadNote ? escapeHTML(state.uploadNote) : photoCount() ? state.step === 3 ? `선택한 사진 ${photoCount()}장으로 분석해요.` : `사진 ${photoCount()}장을 골랐어요. 준비됐다면 다음으로 넘어가 주세요.` : '사진을 고르면 이곳에 미리보기가 나타나요.'}</p>`;
 }
 function selection() {
-  return `<section class="surface" id="photo-upload"><div class="surface-heading"><span class="section-number">02</span><div><p class="section-kicker">사진 고르기</p><h2 data-step-title tabindex="-1">분석할 사진을 골라 주세요</h2><p>한 장만 골라도 좋아요. 같은 부위 사진을 최대 세 장까지 추가할 수 있어요.</p></div></div><div class="drop-zone" data-drop><span class="drop-icon">${icon('upload')}</span><strong>여기에 사진을 놓아 주세요</strong><p>또는 버튼을 눌러 내 기기에서 골라 주세요.</p><button class="button secondary upload-link" data-action="select-photos">사진 고르기${icon('photo')}</button><input class="sr-only" type="file" id="photos-bulk" data-bulk multiple accept="image/jpeg,image/png,image/webp" aria-label="두피 사진 여러 장 선택" aria-describedby="upload-formats"><p class="upload-formats" id="upload-formats">JPG · PNG · WEBP / 한 장에 10MB, 2,000만 화소 이하</p></div><div class="upload-grid">${photoSlots()}</div>${uploadFeedback()}<p class="privacy-note">${icon('lock')} 아직 사진을 전송하지 않았어요. 다음 단계에서 확인한 뒤 분석해요.</p><div class="flow-actions">${button('촬영 안내 다시 보기', 'back', true, 'back')}${button('선택한 사진 확인하기', 'next', false, 'arrow', !photoCount() || !!state.reading.size)}</div></section>`;
+  return `<section class="surface" id="photo-upload"><div class="surface-heading"><span class="section-number">02</span><div><p class="section-kicker">사진 고르기</p><h2 data-step-title tabindex="-1">분석할 사진을 골라 주세요</h2><p>한 장만 골라도 좋아요. 같은 부위 사진을 최대 세 장까지 추가할 수 있어요.</p></div></div><div class="drop-zone" data-drop><span class="drop-icon">${icon('upload')}</span><strong>여기에 사진을 놓아 주세요</strong><p>또는 버튼을 눌러 내 기기에서 골라 주세요.</p><button class="button secondary upload-link" data-action="select-photos">사진 고르기${icon('photo')}</button><input class="sr-only" type="file" id="photos-bulk" data-bulk multiple accept="image/jpeg,image/png,image/webp" aria-label="두피 사진 여러 장 선택" aria-describedby="upload-formats"><p class="upload-formats" id="upload-formats">JPG · PNG · WEBP / 한 장에 10MB, 2,000만 화소 이하</p></div><div class="upload-grid">${photoSlots()}</div>${uploadFeedback()}${window.ScalpCamera ? ScalpCamera.markup() : ''}<p class="privacy-note">${icon('lock')} 아직 사진을 전송하지 않았어요. 다음 단계에서 확인한 뒤 분석해요.</p><div class="flow-actions">${button('촬영 안내 다시 보기', 'back', true, 'back')}${button('선택한 사진 확인하기', 'next', false, 'arrow', !photoCount() || !!state.reading.size)}</div></section>`;
 }
 function review() {
   const photos = state.photos.filter(Boolean);
@@ -246,7 +247,7 @@ function analysisDetails(result) {
 function report() {
   const result = state.result;
   if (!result) return `${intro('분석 결과', '아직 분석한 사진이 없어요.', '사진 한 장을 준비하면 네 가지 항목을 살펴볼 수 있어요.')}${emptyState('첫 기록을 시작해 볼까요?', '사진 준비부터 하나씩 안내해 드릴게요. 이전 결과는 내 기록에서 다시 볼 수 있어요.')}`;
-  return `${intro(state.savedId ? '저장한 두피 기록' : '사진 분석 완료', state.savedId ? '저장한 분석 결과를 살펴보세요.' : '두피 분석 결과가 준비됐어요.', state.savedId ? '분석한 날짜와 네 가지 항목의 결과를 확인해 보세요.' : '네 가지 항목을 살펴보고, 결과를 저장해 다음 기록과 함께 보세요.')}<section class="report-overview"><div class="result-meta">${icon('calendar')} ${shortDate(result.date)}<span>사진 ${result.photo_count}장 분석</span></div><span class="result-tag">${state.savedId ? '저장된 기록' : '새로운 기록'}</span></section>${resultExplanation(result)}${legacyAnalysisNotice(result)}<section class="metrics" aria-label="네 가지 분석 결과">${metricCards(result)}</section><section class="surface next-step"><div><span class="section-kicker">이 결과를 다음에도 보고 싶다면</span><h2>${state.savedId ? '내 기록에 잘 보관했어요' : '오늘의 결과를 기록해 두세요'}</h2><p>${state.savedId ? state.user ? '이 계정의 내 기록에서 언제든 다시 볼 수 있어요.' : '같은 브라우저의 내 기록에서 언제든 다시 볼 수 있어요.' : recordStorageCopy()}</p></div>${state.savedId ? '<a class="button" href="#history">내 기록 보러 가기' + icon('arrow') + '</a>' : button(state.saving ? '기록을 저장하고 있어요' : '오늘의 결과 저장하기', 'save', false, 'save', state.saving || state.authLoading || state.authUnavailable)}</section>${analysisDetails(result)}<section class="surface care-invite"><div><span class="section-kicker">오늘의 결과로 시작하는 관리</span><h2>내 두피에 맞는 습관을 살펴볼까요?</h2><p>분석한 항목에 맞춰 오늘 실천할 관리 방법을 모았어요.</p></div><a class="button secondary" href="#care">맞춤 관리 보기${icon('leaf')}</a></section><div class="bottom-actions">${button('결과 인쇄하기', 'print', true, 'report')}${button('다른 사진 분석하기', 'new', true, 'photo')}</div>`;
+  return `${intro(state.savedId ? '저장한 두피 기록' : '사진 분석 완료', state.savedId ? '저장한 분석 결과를 살펴보세요.' : '두피 분석 결과가 준비됐어요.', state.savedId ? '분석한 날짜와 네 가지 항목의 결과를 확인해 보세요.' : '네 가지 항목을 살펴보고, 결과를 저장해 다음 기록과 함께 보세요.')}<section class="report-overview"><div class="result-meta">${icon('calendar')} ${shortDate(result.date)}<span>사진 ${result.photo_count}장 분석</span></div><span class="result-tag">${state.savedId ? '저장된 기록' : '새로운 기록'}</span></section>${resultExplanation(result)}${legacyAnalysisNotice(result)}<section class="metrics" aria-label="네 가지 분석 결과">${metricCards(result)}</section><section class="surface next-step"><div><span class="section-kicker">이 결과를 다음에도 보고 싶다면</span><h2>${state.savedId ? '내 기록에 잘 보관했어요' : '오늘의 결과를 기록해 두세요'}</h2><p>${state.savedId ? state.user ? '이 계정의 내 기록에서 언제든 다시 볼 수 있어요.' : '같은 브라우저의 내 기록에서 언제든 다시 볼 수 있어요.' : recordStorageCopy()}</p></div>${state.savedId ? '<a class="button" href="#history">내 기록 보러 가기' + icon('arrow') + '</a>' : button(state.saving ? '기록을 저장하고 있어요' : '오늘의 결과 저장하기', 'save', false, 'save', state.saving || state.authLoading || state.authUnavailable)}</section>${analysisDetails(result)}<section class="surface care-invite"><div><span class="section-kicker">오늘의 결과로 시작하는 관리</span><h2>내 두피에 맞는 습관을 살펴볼까요?</h2><p>분석한 항목에 맞춰 오늘 실천할 관리 방법을 모았어요.</p></div><a class="button secondary" href="#care">맞춤 관리 보기${icon('leaf')}</a></section><div class="bottom-actions">${button(state.pdfBusy ? 'PDF를 준비하고 있어요' : 'PDF로 저장하기', 'download-pdf', true, 'report', state.pdfBusy)}${button('다른 사진 분석하기', 'new', true, 'photo')}</div>`;
 }
 function graphRecords(range) {
   const records = readRecords();
@@ -300,21 +301,19 @@ function sebumPresenceChart(range) {
 }
 function calendar() {
   const first = new Date(state.year, state.month, 1).getDay(), days = new Date(state.year, state.month + 1, 0).getDate();
-  const dates = new Set(readRecords().map(r => r.date));
-  return `<div class="calendar-header"><h2>${state.year}년 ${state.month + 1}월</h2><div><button data-action="prev-month" aria-label="이전 달">${icon('back')}</button><button data-action="next-month" aria-label="다음 달">${icon('arrow')}</button></div></div><div class="calendar">${['일', '월', '화', '수', '목', '금', '토'].map(d => `<span class="day-label">${d}</span>`).join('')}${'<span></span>'.repeat(first)}${Array.from({ length: days }, (_, i) => { const date = `${state.year}-${String(state.month + 1).padStart(2, '0')}-${String(i + 1).padStart(2, '0')}`; return `<button ${dates.has(date) ? `data-date="${date}"` : 'disabled'} class="${dates.has(date) ? 'record' : ''} ${date === state.selectedDate ? 'chosen' : ''}" aria-label="${shortDate(date)} ${dates.has(date) ? '기록 보기' : '기록 없음'}" aria-pressed="${date === state.selectedDate}">${i + 1}</button>`; }).join('')}</div><p class="calendar-note">점이 표시된 날짜에 저장한 기록이 있어요.</p>`;
+  const dates = new Set(readRecords().map(record => record.date)), month = careMonthKey();
+  return `<div class="calendar-header"><h2>${state.year}년 ${state.month + 1}월</h2><div><button data-action="prev-month" aria-label="이전 달" ${state.careSaving ? 'disabled' : ''}>${icon('back')}</button><button data-action="next-month" aria-label="다음 달" ${state.careSaving || month >= today().slice(0,7) ? 'disabled' : ''}>${icon('arrow')}</button></div></div><div class="calendar">${['일', '월', '화', '수', '목', '금', '토'].map(day => `<span class="day-label">${day}</span>`).join('')}${'<span class="blank"></span>'.repeat(first)}${Array.from({length:days}, (_,index) => {
+    const date = `${month}-${String(index+1).padStart(2,'0')}`, record = dates.has(date), careDay = state.careMonth === month && (state.careDays[date]?.length || 0) > 0;
+    return `<button data-date="${date}" ${date > today() || state.careSaving ? 'disabled' : ''} class="${record ? 'record' : ''} ${careDay ? 'care-day' : ''} ${date === state.selectedDate ? 'chosen' : ''}" aria-label="${shortDate(date)}${record ? ' · 분석 기록' : ''}${careDay ? ' · 관리 실천 기록' : ''}" aria-pressed="${date === state.selectedDate}">${index+1}${careDay ? '<span class="care-day-mark" aria-hidden="true">✓</span>' : ''}</button>`;
+  }).join('')}</div><p class="calendar-note">● 분석 기록 · ✓ 관리 실천 기록<br>날짜를 선택해 실천을 체크하거나 지난 기록을 확인해요.</p>${state.careMonthLoading ? '<p class="form-hint" role="status">달력의 관리 기록을 불러오고 있어요.</p>' : ''}${state.careMonthError ? `<p class="inline-notice error" role="alert">${escapeHTML(state.careMonthError)}</p>${button('달력 다시 불러오기','reload-care',true)}` : ''}<button class="text-button" data-action="care-today" ${state.careSaving ? 'disabled' : ''}>오늘로 돌아가기</button>`;
 }
 function history() {
-  const records = readRecords();
-  if (records.length && !state.historyInitialized) {
-    state.selectedDate = records.at(-1).date; state.year = Number(state.selectedDate.slice(0, 4)); state.month = Number(state.selectedDate.slice(5, 7)) - 1; state.historyInitialized = true;
-  }
-  const selected = records.filter(r => r.date === state.selectedDate);
-  const header = intro('차곡차곡 쌓이는 나의 기록', '다시 보고 싶은 순간을 모았어요.', '날짜를 선택하면 그날 저장한 결과를 다시 볼 수 있어요.');
+  const records = readRecords(), selected = records.filter(record => record.date === state.selectedDate);
+  const header = intro('차곡차곡 쌓이는 나의 기록', '분석 결과와 관리한 날을 모아요.', '달력에서 날짜를 선택해 분석 결과와 실천한 관리를 함께 확인해요.');
   if (state.authLoading || state.recordsLoading) return `${header}<section class="surface empty-state" role="status"><h2>내 기록을 불러오고 있어요</h2></section>`;
   if (state.authUnavailable) return `${header}${accountDataError('account')}`;
   if (state.user && state.recordsError) return `${header}${accountDataError('records')}`;
-  if (!records.length) return `${header}${accountContext()}${emptyState('아직 저장한 기록이 없어요', '사진 분석을 마친 뒤 ‘오늘의 결과 저장하기’를 눌러 주세요. 내 기록에서 다시 볼 수 있어요.')}`;
-  return `${header}${accountContext()}<div class="history-stats"><div class="stat-item"><span>저장한 기록</span><strong>${records.length}<small>회</small></strong></div><div class="stat-item"><span>살펴본 사진</span><strong>${records.reduce((sum, r) => sum + r.photo_count, 0)}<small>장</small></strong></div><div class="stat-item"><span>가장 최근 기록</span><strong>${records.at(-1).date.slice(5).replace('-', '.')}</strong></div></div><div class="history-layout"><section class="surface">${calendar()}</section><section class="surface history-list"><div class="surface-heading"><div><p class="section-kicker">선택한 날짜</p><h2>${shortDate(state.selectedDate)}</h2></div></div>${selected.map(r => `<article class="history-record"><div class="record-date"><strong>두피 사진 분석</strong><span>사진 ${r.photo_count}장</span></div>${legacyAnalysisNotice(r, true)}<div class="record-metrics">${r.metrics.map((m, i) => `<span>${metricName(m)}<strong>${escapeHTML(metricLabel(m))}</strong></span>`).join('')}</div><div class="record-actions"><button class="button secondary" data-record="${escapeHTML(r.id)}">결과 다시 보기${icon('arrow')}</button></div></article>`).join('') || '<div class="empty-state"><h3>이날은 저장한 기록이 없어요</h3><p>달력에서 점이 표시된 날짜를 선택해 주세요.</p></div>'}</section></div><details class="details-panel" data-details="history-chart"><summary><span>분석 등급의 변화 살펴보기</span><span>항목에 맞는 판정 기준으로 비교해요</span></summary><div class="details-content"><p class="chart-footnote">같은 분석 기준으로 저장한 기록의 결과를 비교해요. 각질의 중간 등급은 경중등도(경증+중등도), 탈모 여부·모낭사이홍반의 중간 등급은 경증이에요. 피지의 무·유 결과는 별도 그래프로 보여줘요. 촬영 조건이 다르면 결과가 달라질 수 있으므로, 그래프만으로 호전·악화를 단정하지 마세요.</p><div class="tabs" aria-label="그래프 기간"><button data-range="week" class="${state.range === 'week' ? 'selected' : ''}" aria-pressed="${state.range === 'week'}">최근 1주</button><button data-range="month" class="${state.range === 'month' ? 'selected' : ''}" aria-pressed="${state.range === 'month'}">선택한 달</button></div>${legend()}${lineChart(state.range)}${sebumPresenceChart(state.range)}</div></details><div class="bottom-actions"><p class="save-note">${recordStorageCopy()}</p><button class="text-button" data-action="clear-records" ${state.deleting ? 'disabled' : ''}>${state.deleting ? '기록을 삭제하고 있어요' : '저장한 기록 모두 삭제'}</button></div>`;
+  return `${header}${accountContext()}<div class="history-stats"><div class="stat-item"><span>저장한 분석</span><strong>${records.length}<small>회</small></strong></div><div class="stat-item"><span>살펴본 사진</span><strong>${records.reduce((sum,record)=>sum+record.photo_count,0)}<small>장</small></strong></div><div class="stat-item"><span>선택한 달의 관리 실천</span><strong>${state.careMonth === careMonthKey() ? Object.values(state.careDays).filter(checks=>checks.length>0).length : 0}<small>일</small></strong></div></div><div class="history-layout"><section class="surface">${calendar()}</section><section class="surface history-list"><div class="surface-heading"><div><p class="section-kicker">선택한 날짜</p><h2>${shortDate(state.selectedDate)}</h2></div></div>${selected.map(record => `<article class="history-record"><div class="record-date"><strong>두피 사진 분석</strong><span>사진 ${record.photo_count}장</span></div>${legacyAnalysisNotice(record,true)}<div class="record-metrics">${record.metrics.map(metric=>`<span>${metricName(metric)}<strong>${escapeHTML(metricLabel(metric))}</strong></span>`).join('')}</div><div class="record-actions"><button class="button secondary" data-record="${escapeHTML(record.id)}">결과 다시 보기${icon('arrow')}</button></div></article>`).join('') || `<div class="history-empty"><h3>이날 저장한 분석 결과가 없어요</h3><p>아래 체크리스트에는 분석 여부와 관계없이 실천한 관리를 남길 수 있어요.</p>${button('사진 분석하러 가기','start',true)}</div>`}</section></div>${historyCareSection()}${records.length ? `<details class="details-panel" data-details="history-chart"><summary><span>분석 등급의 변화 살펴보기</span><span>항목에 맞는 판정 기준으로 비교해요</span></summary><div class="details-content"><p class="chart-footnote">같은 부위를 비슷한 조명에서 촬영한 기록을 비교해요. 각질의 중간 등급은 경중등도이며 피지 무·유는 별도 그래프로 보여줘요. 그래프만으로 호전·악화를 단정하지 마세요.</p><div class="tabs" aria-label="그래프 기간"><button data-range="week" class="${state.range==='week'?'selected':''}" aria-pressed="${state.range==='week'}">최근 1주</button><button data-range="month" class="${state.range==='month'?'selected':''}" aria-pressed="${state.range==='month'}">선택한 달</button></div>${legend()}${lineChart(state.range)}${sebumPresenceChart(state.range)}</div></details>` : ''}<div class="bottom-actions"><p class="save-note">${recordStorageCopy()} 관리 실천 기록은 분석 결과를 삭제해도 유지돼요.</p>${records.length ? `<button class="text-button" data-action="clear-records" ${state.deleting?'disabled':''}>${state.deleting?'기록을 삭제하고 있어요':'저장한 분석 기록 모두 삭제'}</button>` : ''}</div>`;
 }
 function guide() {
   const tips = [
@@ -344,20 +343,19 @@ function renderAccountMenu() {
   if (!menu) return;
   if (state.authLoading) { menu.innerHTML = '<span class="account-status" role="status">로그인 확인 중</span>'; return; }
   if (state.authUnavailable) { menu.innerHTML = '<button class="text-button" data-action="retry-account">로그인 상태 다시 확인</button>'; return; }
-  const busy = state.authBusy || state.working || state.saving || state.deleting || state.careSaving || !!state.reading.size || adminState.mutating || adminState.loading;
+  const busy = state.authBusy || state.working || state.saving || state.deleting || state.careSaving || memberState.busy || state.pdfBusy || !!state.reading.size || adminState.mutating || adminState.loading;
   menu.innerHTML = state.user
-    ? `<span class="account-user">${icon('lock')}<strong data-account-name>${escapeHTML(state.user.nickname)}</strong><span>님</span></span>${isAdmin() ? `<a class="account-link admin-link" data-admin-link href="#admin" ${currentPage() === 'admin' ? 'aria-current="page"' : ''}>관리자 페이지</a>` : ''}<button class="account-link" data-action="logout" ${busy ? 'disabled' : ''}>${state.authBusy ? '로그아웃 중' : '로그아웃'}</button>`
+    ? `<span class="account-user">${icon('lock')}<strong data-account-name>${escapeHTML(state.user.nickname)}</strong><span>님</span></span>${isAdmin() ? `<a class="account-link admin-link" data-admin-link href="#admin" ${currentPage() === 'admin' ? 'aria-current="page"' : ''}>관리자 페이지</a>` : ''}${!isAdmin() ? '<a class="account-link" href="#profile">내 계정</a>' : ''}<button class="account-link" data-action="logout" ${busy ? 'disabled' : ''}>${state.authBusy ? '로그아웃 중' : '로그아웃'}</button>`
     : '<a class="account-link" href="#login">로그인</a><a class="account-link join-link" href="#register">회원가입</a>';
 }
 function authPage(mode) {
-  if (state.user) return `${intro('나의 계정', `${escapeHTML(state.user.nickname)}님, 반가워요.`, '분석 결과와 오늘의 관리를 계정에 모아 보세요.')}<section class="surface auth-already"><a class="button" href="#history">내 기록 보기${icon('arrow')}</a><a class="button secondary" href="#care">맞춤 관리 보기${icon('leaf')}</a></section>`;
-  const signup = mode === 'register';
-  const busy = state.authLoading || state.authBusy || state.working || !!state.reading.size || state.saving || state.deleting || state.careSaving || adminState.mutating || adminState.loading;
-  return `${intro(signup ? '회원가입' : '로그인', signup ? '나만의 두피 기록을 시작해요.' : '다시 만나 반가워요.', signup ? '닉네임과 비밀번호로 나만의 기록을 남겨 보세요.' : '가입한 닉네임과 비밀번호를 입력해 주세요.')}<div class="auth-layout"><section class="surface auth-card"><div class="auth-tabs"><a href="#login" ${!signup ? 'aria-current="page"' : ''}>로그인</a><a href="#register" ${signup ? 'aria-current="page"' : ''}>회원가입</a></div><form data-auth-form="${mode}" aria-busy="${busy}"><label class="form-field" for="auth-nickname"><span>닉네임</span><input id="auth-nickname" name="nickname" type="text" maxlength="40" autocomplete="username" required ${busy ? 'disabled' : ''} placeholder="예: 두피관찰자"></label><label class="form-field" for="auth-password"><span>비밀번호</span><input id="auth-password" name="password" type="password" maxlength="128" autocomplete="${signup ? 'new-password' : 'current-password'}" required aria-describedby="password-help" ${busy ? 'disabled' : ''} placeholder="비밀번호를 입력해 주세요"></label><p class="form-hint" id="password-help">${signup ? '로그인에 사용할 비밀번호를 입력해 주세요.' : '가입할 때 사용한 비밀번호를 입력해 주세요.'}</p><p class="inline-notice error" id="auth-error" role="alert" ${state.authError ? '' : 'hidden'}>${escapeHTML(state.authError)}</p>${state.working ? '<p class="form-hint">사진 분석이 끝나면 계정을 변경할 수 있어요.</p>' : ''}<button class="button" data-auth-submit type="submit" ${busy || state.authUnavailable || !CAN_FETCH ? 'disabled' : ''}>${state.authBusy ? '잠시만 기다려 주세요' : signup ? '회원가입' : '로그인하기'}${icon('arrow')}</button></form>${state.authUnavailable ? accountDataError('account') : ''}<a class="text-button guest-link" href="#analysis">로그인 없이 사진 분석하기 ${icon('arrow')}</a></section><aside class="auth-benefits"><span class="section-kicker">나를 위한 작은 기록장</span><h2>사진 한 장에서<br> 매일의 관리까지</h2><p>${icon('calendar')} 내 계정에 분석 결과를 모아요.</p><p>${icon('leaf')} 결과에 맞는 관리 습관을 살펴봐요.</p><p>${icon('check')} 오늘 실천한 관리를 체크해요.</p><div class="guide-callout"><strong>기록은 이렇게 보관돼요</strong><p>분석 결과와 오늘의 실천을 계정에 모아둘 수 있어요. 로그인 없이 저장한 기록은 현재 브라우저에 보관되며, 계정의 기록과 따로 관리돼요.</p></div></aside></div>`;
+  if (state.user) return `${intro('나의 계정', `${escapeHTML(state.user.nickname)}님, 반가워요.`, '분석 결과와 오늘의 관리를 계정에 모아 보세요.')}<section class="surface auth-already"><a class="button" href="#history">내 기록 보기${icon('arrow')}</a><a class="button secondary" href="#profile">내 계정 관리${icon('lock')}</a></section>`;
+  const signup = mode === 'register', busy = state.authLoading || state.authBusy || state.working || !!state.reading.size || state.saving || state.deleting || state.careSaving || memberState.busy || adminState.mutating || adminState.loading;
+  return `${intro(signup?'회원가입':'로그인',signup?'나만의 두피 기록을 시작해요.':'다시 만나 반가워요.',signup?'아이디와 비밀번호로 나만의 기록을 남겨 보세요.':'가입한 아이디와 비밀번호를 입력해 주세요.')}<div class="auth-layout"><section class="surface auth-card"><div class="auth-tabs"><a href="#login" ${!signup?'aria-current="page"':''}>로그인</a><a href="#register" ${signup?'aria-current="page"':''}>회원가입</a></div><form data-auth-form="${mode}" aria-busy="${busy}"><label class="form-field" for="auth-nickname"><span>아이디 (닉네임)</span><input id="auth-nickname" name="nickname" type="text" maxlength="40" autocomplete="username" required ${busy?'disabled':''} placeholder="예: 두피관찰자"></label>${signup?nicknameCheckMarkup('auth'):''}<label class="form-field" for="auth-password"><span>비밀번호</span><input id="auth-password" name="password" type="password" maxlength="128" autocomplete="${signup?'new-password':'current-password'}" required aria-describedby="password-help" ${busy?'disabled':''} placeholder="비밀번호를 입력해 주세요"></label><p class="form-hint" id="password-help">${signup?'다른 서비스에서 사용하지 않는 새로운 비밀번호를 사용해 주세요.':'가입할 때 사용한 비밀번호를 입력해 주세요.'}</p>${signup?genderFields('auth',null,busy):''}<p class="inline-notice error" id="auth-error" role="alert" ${state.authError?'':'hidden'}>${escapeHTML(state.authError)}</p>${state.working?'<p class="form-hint">사진 분석이 끝나면 계정을 변경할 수 있어요.</p>':''}<button class="button" data-auth-submit type="submit" ${busy||state.authUnavailable||!CAN_FETCH?'disabled':''}>${state.authBusy?'잠시만 기다려 주세요':signup?'회원가입':'로그인하기'}${icon('arrow')}</button></form>${state.authUnavailable?accountDataError('account'):''}<a class="text-button guest-link" href="#analysis">로그인 없이 사진 분석하기 ${icon('arrow')}</a></section><aside class="auth-benefits"><span class="section-kicker">나를 위한 작은 기록장</span><h2>사진 한 장에서<br> 매일의 관리까지</h2><p>${icon('calendar')} 내 계정에 분석 결과를 모아요.</p><p>${icon('leaf')} 결과에 맞는 관리 습관을 살펴봐요.</p><p>${icon('check')} 날짜별로 실천한 관리를 기록해요.</p><div class="guide-callout"><strong>정보 제공은 내가 선택해요</strong><p>성별 정보를 제공하고 동의하면 성별에 따른 보조 관리 안내를 받아요. 원하지 않으면 성별을 반영하지 않은 포괄적인 관리 방법을 제공해요.</p></div></aside></div>`;
 }
 function validUser(user) { return user && Number.isInteger(user.id) && user.id > 0 && typeof user.nickname === 'string' && user.nickname.length > 0 && user.nickname.length <= 40 && ['user', 'admin'].includes(user.role) && Number.isInteger(user.result_epoch) && user.result_epoch >= 0; }
 function isAdmin() { return state.user?.role === 'admin'; }
-function accountHeaders() { return { 'X-Scalp-Account': state.user ? String(state.user.id) : 'guest', ...(state.user ? { 'X-Scalp-Result-Epoch': String(state.user.result_epoch) } : {}) }; }
+function accountHeaders() { return { 'X-Scalp-Account': state.user ? String(state.user.id) : 'guest', ...(state.user ? { 'X-Scalp-Result-Epoch': String(state.user.result_epoch), 'X-Scalp-Profile-Version': String(state.user.profile_version || 0) } : {}) }; }
 async function jsonRequest(url, options = {}) {
   const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 12000);
   const { body, ...rest } = options;
@@ -375,6 +373,9 @@ async function jsonRequest(url, options = {}) {
 }
 function resetAccountScope() {
   state.accountEpoch++;
+  window.ScalpCamera?.stop();
+  memberState.error = ''; memberState.saved = false; memberState.discardDraft = true;
+  state.careLoadToken++; state.careMonthToken++; state.careMonth = ''; state.careDays = {}; state.careMonthLoading = false; state.careMonthError = '';
   resetAdminScope();
   state.photos.forEach((_, index) => releasePhoto(index)); state.reading.clear(); invalidateResult();
   state.accountRecords = []; state.recordsLoading = false; state.recordsError = ''; state.historyInitialized = false;
@@ -392,12 +393,12 @@ async function refreshAccountContext(message) {
   go('analysis'); await bootstrapAccount(); toast(message);
 }
 async function refreshChangedAccount() { return refreshAccountContext('사용 중인 계정이 바뀌었어요. 현재 계정으로 다시 확인해 주세요.'); }
-async function refreshChangedData() { return refreshAccountContext('관리자가 기록을 초기화했어요. 현재 기록을 다시 불러왔으니 새 사진으로 분석해 주세요.'); }
+async function refreshChangedData() { return refreshAccountContext('계정 정보 또는 기록 상태가 변경됐어요. 현재 계정의 정보를 다시 불러왔어요.'); }
 async function accountRequest(url, options = {}) {
   try { return await jsonRequest(url, { ...options, headers: { ...(options.headers || {}), ...accountHeaders() } }); }
   catch (error) {
     if (error.status === 409 && error.code === 'account_changed') await refreshChangedAccount();
-    else if (error.status === 409 && error.code === 'data_changed') await refreshChangedData();
+    else if (error.status === 409 && ['data_changed', 'profile_changed'].includes(error.code)) await refreshChangedData();
     else if (error.status === 403 && error.code === 'admin_required') await refreshAccountContext('관리자 권한을 다시 확인했어요. 현재 계정에서 이용할 수 있는 화면으로 이동했어요.');
     else if (error.status === 401 && state.user) expireSession();
     throw error;
@@ -421,9 +422,10 @@ async function submitAuth(form) {
   if (state.authBusy || state.authLoading || state.authUnavailable || state.working || state.saving || state.deleting || state.careSaving || state.reading.size || adminState.mutating || adminState.loading) return;
   const nickname = form.elements.nickname.value.trim(), password = form.elements.password.value, mode = form.dataset.authForm;
   if (!nickname || !password) { state.authError = '닉네임과 비밀번호를 입력해 주세요.'; render(); return; }
+  const body = { nickname, password, ...(mode === 'register' ? { gender_consent: form.elements.gender_consent.checked, gender: form.elements.gender_consent.checked ? form.elements.gender.value : null } : {}) };
   state.authBusy = true; state.authError = ''; render();
   try {
-    const data = await jsonRequest(`/api/auth/${mode}`, { method: 'POST', body: { nickname, password } });
+    const data = await jsonRequest(`/api/auth/${mode}`, { method: 'POST', body });
     if (!validUser(data.user)) throw new Error('계정 정보를 확인하지 못했어요. 다시 로그인해 주세요.');
     resetAccountScope(); state.user = data.user; state.authBusy = false;
     go('analysis'); toast(`${data.user.nickname}님, ${mode === 'register' ? '회원가입을 마쳤어요.' : '로그인했어요.'}`);
@@ -462,64 +464,20 @@ async function clearRecords() {
   } catch (error) { if (epoch === state.accountEpoch) toast(error.message || '기록을 지우지 못했어요. 다시 시도해 주세요.'); }
   finally { if (epoch === state.accountEpoch) { state.deleting = false; render(true); } }
 }
-function careResult() { return state.result || readRecords().at(-1); }
-function care() {
-  if (!state.user && state.careDate !== today()) { state.careChecks = new Set(); state.careDate = today(); }
-  const header = intro('분석에서 일상으로', '나에게 맞는 관리를 이어가요.', '사진 분석 등급과 피지 유무에 맞춘 생활 관리 안내예요. 진단이나 치료를 대신하지 않아요.');
-  if (state.authLoading || state.recordsLoading) return `${header}<section class="surface empty-state" role="status"><h2>나의 관리 안내를 준비하고 있어요</h2></section>`;
-  if (state.authUnavailable) return `${header}${accountDataError('account')}`;
-  if (state.user && state.recordsError && !state.result) return `${header}${accountDataError('records')}`;
-  const result = careResult();
-  if (!result) return `${header}${accountContext()}${emptyState('분석 결과로 맞춤 관리를 시작해요', '사진 한 장을 분석하면 네 가지 항목의 결과에 맞춰 실천할 관리 습관을 안내해 드려요.')}`;
-  const plan = buildCarePlan(result), complete = plan.items.filter(item => state.careChecks.has(item.id)).length;
-  return `${header}${accountContext()}<section class="surface care-summary"><div><span class="section-kicker">관리 안내의 기준</span><h2>${shortDate(result.date)} 분석 결과</h2><p>${plan.note ? escapeHTML(plan.note) : '가장 최근에 확인한 분석 결과를 기준으로 안내해요.'}</p></div><div class="care-grade-summary">${result.metrics.map((metric, index) => `<span>${metricName(metric)}<strong class="grade-text grade-${metricGrade(metric)}">${escapeHTML(metricLabel(metric))}</strong></span>`).join('')}</div></section>${legacyAnalysisNotice(result)}<section class="surface care-routine"><div class="surface-heading"><div><p class="section-kicker">${shortDate(today())} · 오늘의 실천</p><h2>작은 습관부터 하나씩 해봐요</h2></div><span class="care-check-count" data-care-count role="status">${complete} / ${plan.items.length} 실천</span></div>${state.careLoading ? '<p class="form-hint" role="status">오늘의 실천 기록을 불러오고 있어요.</p>' : ''}${state.careError ? `<div class="inline-notice error" role="alert"><p>${escapeHTML(state.careError)}</p>${button('실천 기록 다시 불러오기', 'reload-care', true)}</div>` : ''}<div class="care-items">${plan.items.map(item => `<label class="care-task ${state.careChecks.has(item.id) ? 'is-done' : ''}"><input type="checkbox" data-care-check="${escapeHTML(item.id)}" ${state.careChecks.has(item.id) ? 'checked' : ''} ${state.careLoading || state.careSaving || !!state.careError ? 'disabled' : ''}><span class="care-task-copy"><span class="care-reason">${escapeHTML(item.reason)}</span><strong>${escapeHTML(item.title)}</strong><span>${escapeHTML(item.text)}</span></span></label>`).join('')}</div><p class="save-note">${state.user ? state.careSaving ? '오늘의 실천을 저장하고 있어요.' : '체크한 실천은 오늘 날짜로 내 계정에 자동 저장돼요.' : '로그인 없이 체크한 실천은 이 페이지를 사용하는 동안 유지돼요. 로그인하면 계정에 보관할 수 있어요.'}</p></section><details class="details-panel" data-details="care-sources"><summary><span>관리 안내의 근거 살펴보기</span><span>생활 관리 정보의 출처를 확인해요</span></summary><div class="details-content"><p>사진의 분석 등급에 따라 아래 생활 관리 정보에서 관련 안내를 골랐어요. 약이나 제품을 처방하는 기능은 아니에요.</p><ul class="care-sources">${plan.sources.map(source => `<li><a href="${escapeHTML(source.url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(source.title)} ↗</a></li>`).join('')}</ul></div></details><div class="bottom-actions"><a class="button secondary" href="#guide">다음 촬영 준비하기${icon('camera')}</a>${button('새 사진 분석하기', 'new', true, 'photo')}</div>`;
-}
-function ensureCareLoaded() {
-  if (!state.careLoading && !state.careSaving && state.careDate !== today()) {
-    if (state.user) loadCareChecks();
-    else { state.careChecks = new Set(); state.careDate = today(); }
-  }
-}
-const CARE_CHECK_IDS = ['gentle-wash', 'low-heat', 'observe', 'flakes-care', 'sebum-care', 'hair-care', 'redness-care'];
-function validCareChecks(data, date) { return data && data.date === date && Array.isArray(data.checks) && data.checks.length <= CARE_CHECK_IDS.length && new Set(data.checks).size === data.checks.length && data.checks.every(id => CARE_CHECK_IDS.includes(id)); }
-async function loadCareChecks() {
-  if (!state.user || state.careLoading || state.careSaving) return;
-  const epoch = state.accountEpoch, date = today(); state.careLoading = true; state.careError = '';
-  if (state.careDate !== date) state.careChecks = new Set();
-  state.careDate = date; render();
-  try {
-    const data = await accountRequest(`/api/care-checks?date=${date}`);
-    if (epoch !== state.accountEpoch) return;
-    if (!validCareChecks(data, date)) throw new Error('오늘의 실천 기록을 확인하지 못했어요. 다시 불러와 주세요.');
-    state.careChecks = new Set(data.checks);
-  } catch (error) { if (epoch === state.accountEpoch) state.careError = error.message; }
-  finally { if (epoch === state.accountEpoch) { state.careLoading = false; render(); } }
-}
-async function toggleCareCheck(input) {
-  if (state.careLoading || state.careSaving || state.careError || !CARE_CHECK_IDS.includes(input.dataset.careCheck)) return;
-  const epoch = state.accountEpoch, before = new Set(state.careChecks), date = today(), id = input.dataset.careCheck;
-  if (state.careDate !== date) { state.careChecks = new Set(); state.careDate = date; }
-  if (input.checked) state.careChecks.add(id); else state.careChecks.delete(id);
-  if (!state.user) { render(); return; }
-  state.careSaving = true; render();
-  try {
-    const data = await accountRequest('/api/care-checks', { method: 'PUT', body: { date, checks: [...state.careChecks] } });
-    if (epoch !== state.accountEpoch) return;
-    if (!validCareChecks(data, date)) throw new Error('실천 기록을 확인하지 못했어요. 다시 불러와 주세요.');
-    state.careChecks = new Set(data.checks);
-  } catch (error) { if (epoch === state.accountEpoch) { state.careChecks = before; state.careError = error.message; } }
-  finally { if (epoch === state.accountEpoch) { state.careSaving = false; render(); } }
-}
+
 document.addEventListener('submit', event => {
   if (event.target.matches('[data-auth-form]')) { event.preventDefault(); submitAuth(event.target); }
 });
 
-function currentPage() { const route = location.hash.slice(1) || 'analysis'; return ['analysis', 'report', 'history', 'care', 'guide', 'about', 'login', 'register', 'admin'].includes(route) ? route : 'analysis'; }
+function currentPage() { const route = location.hash.slice(1) || 'analysis'; return ['analysis', 'report', 'history', 'care', 'guide', 'about', 'login', 'register', 'admin', 'profile'].includes(route) ? route : 'analysis'; }
 function focusContent(selector = 'h1') { requestAnimationFrame(() => $('#main').querySelector(selector)?.focus({ preventScroll: true })); }
 function render(focus = false) {
   const page = currentPage();
   if (page !== 'admin') adminState.credentials = null;
-  const authDraft = $('#main').dataset.page === page && $('[data-auth-form]') ? { nickname: $('#auth-nickname')?.value, password: $('#auth-password')?.value } : null;
+  const authDraft = memberDraft(page);
+  const oldCamera = $('[data-scalp-camera]');
+  const keepCamera = page === 'analysis' && state.step === 2 && !state.working && oldCamera?.dataset.scope === String(state.accountEpoch);
+  if (!keepCamera) window.ScalpCamera?.stop();
   // Keep expanded details and keyboard focus when only asynchronous status changes.
   const opened = $$('details[open][data-details]').map(el => el.dataset.details);
   const focused = document.activeElement;
@@ -529,13 +487,16 @@ function render(focus = false) {
   const scrollY = window.scrollY;
   $$('[data-nav]').forEach(link => { const active = link.dataset.nav === page || (page === 'report' && link.dataset.nav === 'analysis'); link.classList.toggle('active', active); if (active) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current'); });
   renderAccountMenu();
-  $('#main').innerHTML = ({ analysis, report, history, care, guide, about, admin: adminPage, login: () => authPage('login'), register: () => authPage('register') })[page]();
+  $('#main').innerHTML = ({ analysis, report, history, care, guide, about, profile: profilePage, admin: adminPage, login: () => authPage('login'), register: () => authPage('register') })[page]();
   $('#main').dataset.page = page;
-  if (authDraft && $('[data-auth-form]')) { $('#auth-nickname').value = authDraft.nickname || ''; $('#auth-password').value = authDraft.password || ''; }
-  if (page === 'care') ensureCareLoaded();
+  restoreMemberDraft(authDraft);
+  const camera = $('[data-scalp-camera]');
+  if (camera && keepCamera) camera.replaceWith(oldCamera);
+  else if (camera && window.ScalpCamera) { camera.dataset.scope = String(state.accountEpoch); ScalpCamera.mount({ onCapture: file => addPhotos([file]), onMessage: toast }); }
+  if (page === 'history') ensureCareLoaded();
   if (page === 'admin') ensureAdminLoaded();
   opened.forEach(key => { const details = $$('details[data-details]').find(el => el.dataset.details === key); if (details) details.open = true; });
-  document.title = `${{ analysis: '사진 분석', report: '분석 결과', history: '내 기록', care: '맞춤 관리', guide: '촬영 가이드', login: '로그인', register: '회원가입', about: '서비스 소개', admin: '관리자 페이지' }[page]} | 딥러닝 기반 AI 두피 관리 서비스`;
+  document.title = `${{ analysis: '사진 분석', report: '분석 결과', history: '내 기록', care: '맞춤 관리', guide: '촬영 가이드', login: '로그인', register: '회원가입', about: '서비스 소개', admin: '관리자 페이지', profile: '내 계정' }[page]} | 딥러닝 기반 AI 두피 관리 서비스`;
   $('#server-status').textContent = !CAN_FETCH ? '서비스 주소에서 접속 필요' : state.health.status === 'ready' ? '분석 준비 완료' : state.health.status === 'loading' ? '분석 준비 중' : '연결 확인 필요';
   $('#server-status').dataset.status = state.health.status;
   $('#server-dot').dataset.status = state.health.status;
@@ -611,7 +572,7 @@ async function analyzePhotos() {
     let data; try { data = await response.json(); } catch { throw new Error('결과를 불러오지 못했어요. 선택한 사진은 그대로 있으니 다시 분석해 주세요.'); }
     if (!response.ok) {
       if (response.status === 409 && data.code === 'account_changed') { await refreshChangedAccount(); return; }
-      if (response.status === 409 && data.code === 'data_changed') { await refreshChangedData(); return; }
+      if (response.status === 409 && ['data_changed', 'profile_changed'].includes(data.code)) { await refreshChangedData(); return; }
       const messages = { 400: '사진을 확인하지 못했어요. 사진의 형식과 크기를 살펴본 뒤 다시 골라 주세요.', 413: '사진 용량이 너무 커요. 한 장에 10MB 이하인 사진을 최대 3장 골라 주세요.', 429: '다른 분석이 진행 중이에요. 잠시 기다린 뒤 다시 눌러 주세요.', 503: '분석할 준비가 아직 끝나지 않았어요. 잠시 후 다시 눌러 주세요.' };
       throw new Error(messages[response.status] || '분석을 마치지 못했어요. 사진은 그대로 남아 있으니 잠시 후 다시 시도해 주세요.');
     }
@@ -653,6 +614,7 @@ function startNew(skipGuide = false) {
   state.photos.forEach((_, i) => releasePhoto(i)); state.reading.clear(); invalidateResult(); state.error = ''; state.uploadNote = ''; state.step = skipGuide ? 2 : 1; state.maxStep = 2; go('analysis');
 }
 function changeMonth(delta) {
+  if (state.careSaving) return;
   const target = new Date(state.year, state.month + delta, 1);
   state.year = target.getFullYear(); state.month = target.getMonth();
   const prefix = `${state.year}-${String(state.month + 1).padStart(2, '0')}`;
@@ -676,7 +638,7 @@ document.addEventListener('click', event => {
   if (remove && !state.working && !state.reading.size) { const index = Number(remove.dataset.remove); releasePhoto(index); invalidateResult(); state.error = ''; state.uploadNote = ''; render(); requestAnimationFrame(() => $(`#photo-${index}`)?.focus({ preventScroll: true })); return; }
   const step = event.target.closest('[data-step]'); if (step && !step.disabled) { setStep(Number(step.dataset.step)); return; }
   const range = event.target.closest('[data-range]'); if (range) { state.range = range.dataset.range; render(); return; }
-  const date = event.target.closest('[data-date]'); if (date) { state.selectedDate = date.dataset.date; render(); return; }
+  const date = event.target.closest('[data-date]'); if (date && !date.disabled && !state.careSaving) { state.selectedDate = date.dataset.date; render(); return; }
   const stored = event.target.closest('[data-record]');
   if (stored && !state.working) { const result = readRecords().find(r => r.id === stored.dataset.record); if (result) { state.result = result; state.resultPhotos = []; state.savedId = result.id; go('report'); } return; }
   const element = event.target.closest('[data-action]'); if (!element || element.disabled) return;
@@ -688,14 +650,15 @@ document.addEventListener('click', event => {
     case 'health': state.health.status = 'loading'; render(); refreshHealth(); break;
     case 'start': if (currentPage() === 'guide' && photoCount()) { state.step = 2; go('analysis'); } else startNew(currentPage() === 'guide'); break;
     case 'new': startNew(true); break;
-    case 'print': window.print(); break;
+    case 'download-pdf': downloadPDF(); break;
     case 'save': saveResult(); break;
     case 'prev-month': changeMonth(-1); break;
     case 'next-month': changeMonth(1); break;
     case 'clear-records': clearRecords(); break;
     case 'logout': logout(); break;
     case 'reload-records': loadAccountRecords(); break;
-    case 'reload-care': loadCareChecks(); break;
+    case 'reload-care': loadCareChecks(); loadCareMonth(); break;
+    case 'care-today': state.selectedDate = today(); state.year = Number(today().slice(0,4)); state.month = Number(today().slice(5,7))-1; render(); break;
     case 'retry-account': bootstrapAccount(); break;
 
   }
@@ -706,7 +669,7 @@ document.addEventListener('drop', event => { const zone = event.target.closest('
 window.addEventListener('hashchange', () => { render(true); window.scrollTo({ top: 0, behavior: 'instant' }); });
 let checkingFocusedAccount = false;
 function accountInteractionBusy() {
-  return state.authLoading || state.authBusy || state.working || state.saving || state.deleting || state.careSaving || !!state.reading.size || adminState.mutating || adminState.loading;
+  return state.authLoading || state.authBusy || state.working || state.saving || state.deleting || state.careSaving || memberState.busy || state.pdfBusy || !!state.reading.size || adminState.mutating || adminState.loading;
 }
 async function checkAccountOnFocus() {
   if (!CAN_FETCH || document.hidden || state.authUnavailable || checkingFocusedAccount || accountInteractionBusy()) return;
@@ -720,13 +683,14 @@ async function checkAccountOnFocus() {
     if (data.user !== null && !validUser(data.user)) return;
     if (data.user?.id !== state.user?.id) await refreshChangedAccount();
     else if (data.user?.role !== state.user?.role) await refreshAccountContext('계정 권한이 변경되어 현재 이용할 수 있는 화면으로 이동했어요.');
-    else if (data.user?.result_epoch !== state.user?.result_epoch) await refreshChangedData();
+    else if (data.user?.result_epoch !== state.user?.result_epoch || data.user?.profile_version !== state.user?.profile_version) await refreshChangedData();
   } catch {
     // Keep the current selection on a transient connection failure. Every
     // account operation still checks the session and account identity server-side.
   } finally { checkingFocusedAccount = false; }
 }
 window.addEventListener('focus', checkAccountOnFocus);
+window.addEventListener('pagehide', () => window.ScalpCamera?.stop());
 render();
 refreshHealth();
 bootstrapAccount();

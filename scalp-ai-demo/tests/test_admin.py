@@ -48,7 +48,10 @@ class AdminApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.json)
         self.assertEqual(response.json["user"]["role"], "admin")
 
-    def member(self, nickname="same-name", password="123456"):
+    def member(self, nickname=None, password="123456"):
+        if nickname is None:
+            with self.store.connection() as db:
+                nickname = f"member-{db.execute('SELECT COUNT(*) FROM users').fetchone()[0]}"
         client = self.app.test_client()
         response = client.post("/api/auth/register", json={"nickname": nickname, "password": password})
         self.assertEqual(response.status_code, 201, response.json)
@@ -160,6 +163,11 @@ class AdminApiTests(unittest.TestCase):
     def test_generated_reset_pin_differs_from_target_and_duplicate_nickname_peer(self):
         _, target = self.member(password="87654321")
         other, sibling = self.member(password="12345678")
+        # Legacy duplicate fixtures bypass the new public signup rejection.
+        with self.store.connection() as db:
+            db.execute("UPDATE users SET nickname=?,nickname_key=? WHERE id=?",
+                       (target["nickname"], self.store.nickname_key(target["nickname"]), sibling["id"]))
+        sibling["nickname"] = target["nickname"]
         with patch("accounts.secrets.randbelow", side_effect=[12345678, 87654321, 11112222]):
             response = self.admin.post(f"/api/admin/users/{target['id']}/reset-password", json={})
         self.assertEqual(response.status_code, 200, response.json)
@@ -271,6 +279,31 @@ class AdminMigrationTests(unittest.TestCase):
             with second.connection() as db:
                 self.assertEqual(db.execute("SELECT password_hash FROM users WHERE id=41").fetchone()[0], hashed)
                 self.assertEqual(db.execute("SELECT COUNT(*) FROM users WHERE role='admin'").fetchone()[0], 0)
+
+    def test_cli_updates_existing_admin_without_printing_password_or_changing_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "cli-update.sqlite3"
+            store = AccountStore(database)
+            admin = store.create_admin("original-admin", "original-secret")
+            session = store.new_session(admin["id"])
+            with store.connection() as db:
+                db.execute("INSERT INTO care_checks(user_id,check_date,checks) VALUES(?,?,?)", (admin["id"], "2026-11-01", '["observe"]'))
+            password = "isolated-new-secret"
+            completed = subprocess.run([sys.executable, "-X", "utf8", str(ROOT / "scripts/manage_admin.py"), "--database", str(database),
+                                        "update", "--user-id", str(admin["id"]), "--nickname", "updated-admin", "--password-stdin"],
+                                       input=password + "\n", cwd=ROOT, text=True, encoding="utf-8", capture_output=True, timeout=30)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            user = json.loads(completed.stdout)["user"]
+            self.assertEqual(user["id"], admin["id"])
+            self.assertEqual(user["nickname"], "updated-admin")
+            self.assertEqual(user["role"], "admin")
+            self.assertNotIn(password, completed.stdout + completed.stderr)
+            self.assertIsNone(store.current_user(session))
+            self.assertEqual(store.login({"nickname": "updated-admin", "password": password})["id"], admin["id"])
+            self.assertEqual(store.care_checks(admin["id"], "2026-11-01")["checks"], ["observe"])
+            actions = store.admin_actions(admin["id"])
+            self.assertTrue(any(action["action"] == "admin_credentials_updated" for action in actions))
+            self.assertNotIn(password, json.dumps(actions))
 
     def test_cli_creates_admin_only_in_explicit_database(self):
         with tempfile.TemporaryDirectory() as temporary:

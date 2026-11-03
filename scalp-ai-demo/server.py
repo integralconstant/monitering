@@ -10,11 +10,12 @@ import sqlite3
 import warnings
 from pathlib import Path
 
-from flask import Flask, g, jsonify, render_template, request, send_from_directory
+from flask import Flask, g, jsonify, render_template, request, send_file, send_from_directory
 from PIL import Image, ImageOps, UnidentifiedImageError
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 
 from accounts import AccountError, AccountStore, COOKIE_NAME, SESSION_SECONDS
+from runtime_identity import SERVICE_ID, installation_id
 
 BASE_DIR = Path(__file__).resolve().parent
 MAX_FILE_BYTES = 10 * 1024 * 1024
@@ -69,7 +70,7 @@ def create_app(service=None, database_path=None) -> Flask:
             if (origin and origin != request.host_url.rstrip("/")) or request.headers.get("Sec-Fetch-Site") == "cross-site":
                 return jsonify(error="이 웹 서버에서 다시 시도해 주세요."), 403
         g.user = accounts.current_user(request.cookies.get(COOKIE_NAME))
-        protected = request.path in {"/api/records", "/api/care-checks", "/api/analyze"} or request.path.startswith("/api/admin/")
+        protected = request.path in {"/api/records", "/api/care-checks", "/api/analyze", "/api/auth/profile", "/api/report/pdf"} or request.path.startswith("/api/admin/")
         if protected and "X-Scalp-Account" in request.headers:
             expected_account = str(g.user["id"]) if g.user else "guest"
             if request.headers["X-Scalp-Account"] != expected_account:
@@ -78,6 +79,11 @@ def create_app(service=None, database_path=None) -> Flask:
             expected_epoch = str(g.user["result_epoch"]) if g.user else "0"
             if request.headers["X-Scalp-Result-Epoch"] != expected_epoch:
                 return jsonify(error="관리자가 기록을 초기화했어요. 현재 계정의 기록을 다시 확인해 주세요.", code="data_changed"), 409
+
+        if protected and "X-Scalp-Profile-Version" in request.headers:
+            expected_version = str(g.user["profile_version"]) if g.user else "0"
+            if request.headers["X-Scalp-Profile-Version"] != expected_version:
+                return jsonify(error="회원정보가 변경됐어요. 최신 정보로 다시 불러와 주세요.", code="profile_changed"), 409
 
     def require_user():
         if not g.user:
@@ -115,6 +121,19 @@ def create_app(service=None, database_path=None) -> Flask:
     def current_account():
         return jsonify(user=g.user)
 
+    @app.get("/api/auth/nickname")
+    def nickname_availability():
+        return jsonify(accounts.nickname_available(request.args.get("nickname")))
+
+    @app.get("/api/auth/profile")
+    def account_profile():
+        return jsonify(user=accounts.profile(require_user()))
+
+    @app.patch("/api/auth/profile")
+    def update_account_profile():
+        user_id = require_user()
+        return session_response(accounts.update_profile(user_id, json_body(), result_epoch=g.user["result_epoch"]))
+
     @app.post("/api/auth/register")
     def register():
         return session_response(accounts.register(json_body()), 201)
@@ -147,7 +166,12 @@ def create_app(service=None, database_path=None) -> Flask:
 
     @app.get("/api/care-checks")
     def get_care_checks():
-        return jsonify(accounts.care_checks(require_user(), request.args.get("date"), result_epoch=g.user["result_epoch"]))
+        user_id = require_user()
+        if "month" in request.args:
+            if "date" in request.args:
+                raise AccountError("관리 기록은 날짜 또는 월 하나만 선택해 주세요.")
+            return jsonify(accounts.care_month(user_id, request.args.get("month"), result_epoch=g.user["result_epoch"]))
+        return jsonify(accounts.care_checks(user_id, request.args.get("date"), result_epoch=g.user["result_epoch"]))
 
     @app.put("/api/care-checks")
     def save_care_checks():
@@ -208,7 +232,24 @@ def create_app(service=None, database_path=None) -> Flask:
 
     @app.get("/api/health")
     def health():
-        return jsonify(service.health())
+        return jsonify(dict(service.health(), application=SERVICE_ID, installation_id=installation_id(BASE_DIR)))
+
+    @app.post("/api/report/pdf")
+    def download_report():
+        from report_pdf import ReportFontError, ReportValidationError, build_report_pdf
+        body = json_body()
+        try:
+            payload = build_report_pdf(body.get("result"), profile=g.user)
+        except ReportValidationError as exc:
+            return jsonify(error=str(exc)), 400
+        except ReportFontError as exc:
+            app.logger.error("PDF font unavailable: %s", exc)
+            return jsonify(error="보고서의 한글 글꼴을 준비하지 못했어요. 잠시 후 다시 시도해 주세요."), 503
+        except Exception:
+            app.logger.exception("PDF generation failed")
+            return jsonify(error="PDF 보고서를 만들지 못했어요. 잠시 후 다시 시도해 주세요."), 500
+        return send_file(io.BytesIO(payload), mimetype="application/pdf", as_attachment=True,
+                         download_name=f"두피_분석_보고서_{body['result']['date']}.pdf", max_age=0)
 
     @app.post("/api/analyze")
     def analyze():

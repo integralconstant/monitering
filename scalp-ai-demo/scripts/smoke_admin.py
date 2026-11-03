@@ -52,7 +52,7 @@ def create_analysis(page):
         page.locator('[data-action="save"]').click()
     assert pending.value.ok, pending.value.text()
     expect(page.locator('[data-action="save"]')).to_have_count(0)
-    page.locator('[data-nav="care"]').click()
+    page.locator('[data-nav="history"]').click()
     expect(page.locator('[data-care-check="observe"]')).to_be_enabled()
     with page.expect_response(lambda response: "/api/care-checks" in response.url and response.request.method == "PUT") as pending:
         page.locator('[data-care-check="observe"]').check()
@@ -134,7 +134,7 @@ def run_flow(url, output, users):
         assert member_context.request.get("/api/records").json()["records"][0]["id"] == result["id"]
         rejected = member_context.request.post("/api/records", data={"record": result, "save_token": result["save_token"]})
         assert rejected.status == 403, rejected.text()
-        member.locator('[data-nav="care"]').click()
+        member.locator('[data-nav="history"]').click()
         expect(member.locator('[data-care-check="observe"]')).to_be_checked()
 
         admin.once("dialog", lambda dialog: dialog.dismiss())
@@ -197,7 +197,13 @@ def main():
         store = AccountStore(database)
         operator = store.create_admin("운영검증", ADMIN_PASSWORD)
         target = store.register({"nickname": MEMBER_NICKNAME, "password": "111111"})
-        sibling = store.register({"nickname": MEMBER_NICKNAME, "password": "222222"})
+        sibling = store.register({"nickname": MEMBER_NICKNAME + "별도", "password": "222222"})
+        # Preserve legacy duplicate-ID targeting coverage without bypassing the
+        # new public uniqueness policy through a second signup request.
+        with store.connection() as database_connection:
+            database_connection.execute("UPDATE users SET nickname=?,nickname_key=? WHERE id=?",
+                                        (MEMBER_NICKNAME, store.nickname_key(MEMBER_NICKNAME), sibling["id"]))
+        sibling["nickname"] = MEMBER_NICKNAME
         env = {**os.environ, "SCALP_DB_PATH": str(database), "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1"}
         with logfile.open("w", encoding="utf-8") as log:
             process = subprocess.Popen([sys.executable, "-X", "utf8", str(ROOT / "server.py"), "--port", str(args.port)],

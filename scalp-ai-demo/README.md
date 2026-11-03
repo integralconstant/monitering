@@ -4,15 +4,29 @@
 
 ## 실행
 
-이 PC에서는 `start.cmd`를 실행하거나 프로젝트 폴더의 PowerShell에서 실행하세요.
+프로젝트 폴더의 **`start.cmd`를 더블클릭**하세요. 실행 창에서 웹 서비스와 AI 모델을 준비한 뒤 브라우저가 자동으로 열립니다. 준비가 끝난 후 **웹 열기** 버튼으로 페이지를 다시 열 수 있습니다.
+
+- **종료:** 실행 창의 **서비스 종료** 버튼을 누르거나 창을 닫습니다. 실행기가 시작한 서버만 종료하며, 계정과 저장 기록은 유지됩니다.
+- **바탕화면 바로가기:** `create-shortcut.cmd`를 한 번 실행하면 **두피 관리 서비스 실행** 바로가기를 만듭니다. 프로젝트 폴더를 이동했다면 이 파일을 다시 실행하세요.
+- **중복 실행:** 같은 폴더·포트의 실행 창이 이미 있으면 기존 창을 앞으로 가져옵니다. 같은 프로젝트의 서버가 다른 방법으로 실행 중이면 그 서버를 사용하며, 이 경우 실행 창을 닫아도 기존 서버는 유지됩니다.
+- **시작 오류:** 주소 충돌이나 모델 준비 실패는 실행 창에서 안내합니다. **실행 기록 보기**로 `.runtime/server-launcher.log`를 열 수 있으며, 실행기 오류는 `.runtime/launcher.log`에 남습니다. 다른 프로그램이 사용하는 포트의 프로세스를 임의로 종료하지 않습니다.
+
+새 PC는 Python 3.11~3.14와 모델 파일을 준비하고 최초 한 번 **`install.cmd`를 더블클릭**하세요. `setup.ps1`이 별도 `.venv`에 CPU PyTorch와 의존성을 설치합니다. 모델은 자동 다운로드하지 않습니다. 설치가 끝나면 `start.cmd`를 실행합니다.
+
+기본 주소는 **http://127.0.0.1:8000**이며 이 PC에서 접속합니다. `dist/index.html` 직접 열기나 Live Server는 AI·DB 서버를 실행하지 않습니다. PowerShell에서 실행하거나 포트를 바꾸려면 다음처럼 사용합니다.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\start.ps1
+powershell -ExecutionPolicy Bypass -File .\start.ps1 -Port 8001
 ```
 
-접속: **http://127.0.0.1:8000**. 종료는 서버 터미널에서 Ctrl+C. 포트 변경은 `start.ps1 -Port 8001`입니다. 기본 접속 범위는 이 PC입니다. `dist/index.html` 직접 열기나 Live Server는 AI·DB 서버를 실행하지 않습니다.
+개발 중 서버 로그를 터미널에서 직접 보려면 `-Console`을 추가합니다. 이 모드에서는 브라우저를 직접 열며, 종료는 터미널에서 Ctrl+C입니다.
 
-새 PC는 Python 3.11~3.14, 모델 파일을 준비하고 최초 한 번 `setup.ps1`을 실행하세요. 설치는 별도 `.venv`에 CPU PyTorch와 의존성을 설치합니다. 모델은 자동 다운로드하지 않습니다.
+```powershell
+powershell -ExecutionPolicy Bypass -File .\start.ps1 -Console
+```
+
+실행 창을 검증하면서 브라우저 자동 열기만 생략하려면 `start.ps1 -NoBrowser`를 사용합니다.
 
 ## 사용 흐름
 
@@ -34,7 +48,7 @@ powershell -ExecutionPolicy Bypass -File .\start.ps1
 - 사진은 분석 메모리에서만 처리하고 서버·DB·localStorage에 저장하지 않습니다. 원본 파일명도 기록에 저장하지 않습니다.
 - 계정에 저장할 수 있는 결과는 해당 로그인 상태에서 서버가 발급한 서명을 가진 분석 결과입니다. 클라이언트가 결과를 바꾸거나 다른 계정으로 넘기면 저장을 거절합니다.
 
-`SCALP_DB_PATH`로 DB 위치를 지정할 수 있습니다. 기본 `data/`, `.runtime/`, 모델, 가상환경, 검사 결과와 백업 ZIP은 Git에서 제외합니다. DB를 옮기려면 서버를 종료한 뒤 DB 파일을 별도로 백업하세요. 이전 코드 백업에는 계정 DB가 없으며, 이번 피지 교체 전 백업에는 일관된 SQLite 사본도 포함했습니다. 브라우저 기록은 백업에 포함하지 않습니다. 현재 구성은 로컬 시연 기준입니다.
+`SCALP_DB_PATH`로 DB 위치를 지정할 수 있습니다. 기본 `data/`, `.runtime/`, 모델, 가상환경, 검사 결과와 기존 백업 ZIP은 Git에서 제외합니다. 계정 DB와 모델은 GitHub에 저장되지 않으므로 다른 PC로 옮길 때 별도로 전달해야 합니다. DB 파일을 옮기기 전에는 서버를 종료하세요. 사용자 요청에 따라 이후 작업에서 별도 ZIP·DB 백업을 자동 생성하지 않습니다. 현재 구성은 로컬 시연 기준입니다.
 
 ## 관리자 운영
 
@@ -103,7 +117,7 @@ powershell -ExecutionPolicy Bypass -File .\start.ps1
 
 | 주소 | 역할 |
 |---|---|
-| `GET /api/health` | 모델 준비 상태·설정 확인 상태 |
+| `GET /api/health` | 모델 준비 상태·설정 확인 상태·서비스/설치 경로 식별자 |
 | `POST /api/analyze` | multipart `photos` 1~3장, 실제 분석 |
 | `GET /api/auth/me` | 현재 로그인 계정 |
 | `POST /api/auth/register`, `/api/auth/login`, `/api/auth/logout` | 가입·로그인·로그아웃 |
@@ -114,7 +128,7 @@ powershell -ExecutionPolicy Bypass -File .\start.ps1
 | `POST /api/admin/users/<id>/clear-data` | 일반 회원 기록·관리 체크 초기화 |
 | `DELETE /api/admin/users/<id>` | 일반 회원 계정·관련 데이터 삭제 |
 
-`server.py`는 HTTP·업로드, `accounts.py`는 DB·인증·결과 저장, `inference.py`는 모델 추론과 원본 피지 모듈 연결, `model_packages/sebum/`은 수정하지 않은 제공 코드·연동 문서·원본 SHA256 매니페스트, `dist/app.js`는 화면·기록 연결, `dist/admin.js`는 관리자 화면과 조작, `dist/care.js`는 등급별 관리 문구를 담당합니다. JSON 변경 요청은 같은 출처와 JSON 형식을 검사합니다. 웹이 보내는 계정 식별 헤더를 현재 세션과 대조해 다른 탭의 계정 전환 시 잘못된 계정에 저장하지 않도록 막습니다. 모델 준비 전 503, 동시 분석 중 429, 잘못된 입력 400, 용량 초과 413을 반환합니다.
+`launcher.py`는 실행 창·서버 시작과 종료·준비 확인·브라우저 열기, `runtime_identity.py`는 서비스와 설치 경로의 해시 식별자, `server.py`는 HTTP·업로드, `accounts.py`는 DB·인증·결과 저장, `inference.py`는 모델 추론과 원본 피지 모듈 연결, `model_packages/sebum/`은 수정하지 않은 제공 코드·연동 문서·원본 SHA256 매니페스트, `dist/app.js`는 화면·기록 연결, `dist/admin.js`는 관리자 화면과 조작, `dist/care.js`는 등급별 관리 문구를 담당합니다. JSON 변경 요청은 같은 출처와 JSON 형식을 검사합니다. 웹이 보내는 계정 식별 헤더를 현재 세션과 대조해 다른 탭의 계정 전환 시 잘못된 계정에 저장하지 않도록 막습니다. 모델 준비 전 503, 동시 분석 중 429, 잘못된 입력 400, 용량 초과 413을 반환합니다.
 
 ## 검증
 
@@ -125,7 +139,7 @@ node --check dist\care.js
 node --check dist\admin.js
 ```
 
-관리자 권한·기존 DB 전환·임시 비밀번호 충돌 방지 검사를 포함한 단위 테스트 56개가 통과했습니다. 새 피지 패키지·기존 각질 학습 코드와의 대조 검사, 실제 모델을 이용한 웹·회원 브라우저 검사도 통과했습니다. 대조 검사는 각 3장의 텐서·출력이 일치하는지 확인하며 모델 정확도를 측정하지 않습니다. 실제 모델을 사용하는 두 브라우저 검사도 별도로 실행합니다.
+실행기 18개와 관리자 권한·기존 DB 전환·임시 비밀번호 충돌 방지 검사를 포함한 단위 테스트 74개가 통과했습니다. 실행기는 임시 DB·빈 포트에서 실제 모델 네 개의 준비, 기존 서버 재사용, `start.cmd` 진입, 중복 실행 방지, 창 종료 시 서버 트리 종료까지 확인했습니다. 새 피지 패키지·기존 각질 학습 코드와의 대조 검사, 실제 모델을 이용한 웹·회원 브라우저 검사도 통과했습니다. 대조 검사는 각 3장의 텐서·출력이 일치하는지 확인하며 모델 정확도를 측정하지 않습니다. 실제 모델을 사용하는 두 브라우저 검사도 별도로 실행합니다.
 
 제공된 학습 폴더의 정의와 단일 가중치 출력을 직접 비교:
 
@@ -150,9 +164,9 @@ node --check dist\admin.js
 
 개발 의존성은 `requirements-dev.txt`, 브라우저는 설치된 Chrome/Edge headless를 사용합니다. `PLAYWRIGHT_CHROMIUM_EXECUTABLE`로 경로를 지정할 수 있습니다. 실제 모델과 합성 사진으로 분석 연동을 검사하며 합성 사진으로 임상 정확도를 평가하지 않습니다. 화면 검증 결과는 `test-results/`에 저장합니다.
 
-## 변경 전 백업
+## 기존 백업 이력
 
-저장소 루트 `backups/`에 작업 파일의 SHA256 매니페스트를 포함한 ZIP을 보관합니다.
+아래는 이전 작업에서 생성한 파일입니다. 사용자 요청에 따라 이후에는 GitHub로 변경 이력을 관리하고 별도 백업 파일을 자동 생성하지 않습니다. 기존 ZIP은 저장소 루트 `backups/`에 보관되어 있습니다.
 
 - 등급 최초 변경 전: `scalp-ai-before-grades-20261031-181358.zip`
 - 각질 학습 코드 수정 전: `scalp-ai-before-flakes-training-fix-20261101-171417.zip`

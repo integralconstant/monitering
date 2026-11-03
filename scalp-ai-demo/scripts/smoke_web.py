@@ -349,6 +349,57 @@ def open_details_for(page, selector):
         details.locator("summary").first.click()
 
 
+
+def assert_pdf_download(page):
+    """A real analysis exports a PDF file without opening the print dialog."""
+    page.evaluate("window.__smokePrintCalls = 0; window.print = () => { window.__smokePrintCalls += 1; }")
+    export = page.locator('[data-action="download-pdf"]')
+    expect(export).to_have_text(re.compile("PDF"))
+    with page.expect_response(
+        lambda response: response.url.endswith("/api/report/pdf") and response.request.method == "POST",
+        timeout=60000,
+    ) as pending_response:
+        with page.expect_download(timeout=60000) as pending_download:
+            export.click()
+    response = pending_response.value
+    assert response.ok, response.text()
+    download = pending_download.value
+    assert download.failure() is None
+    assert download.suggested_filename.lower().endswith(".pdf"), download.suggested_filename
+    payload = Path(download.path()).read_bytes()
+    assert payload.startswith(b"%PDF-"), payload[:100]
+    assert len(payload) > 1000, len(payload)
+    assert page.evaluate("window.__smokePrintCalls") == 0
+    assert page.evaluate("location.hash") == "#report"
+
+
+def assert_care_plan_and_history(page):
+    """Guidance stays in care, while dated interactive practice lives in history."""
+    page.locator('[data-nav="care"]').click()
+    expect(page.locator(".care-product").first).to_be_visible()
+    assert page.locator(".care-product").count() >= 2
+    expect(page.locator("#care-personalization")).to_be_visible()
+    expect(page.locator("#care-personalization")).to_contain_text("포괄")
+    expect(page.locator("[data-care-check]")).to_have_count(0)
+    for card in page.locator(".care-product").all():
+        assert len(card.inner_text().strip()) > 40
+    assert_customer_copy(page)
+    page.locator('[data-nav="history"]').click()
+    task = page.locator('[data-care-check="gentle-wash"]')
+    expect(task).to_be_visible()
+    task.check()
+    expect(page.locator('[data-care-check="gentle-wash"]')).to_be_checked()
+    page.locator('[data-nav="care"]').click()
+    expect(page.locator("[data-care-check]")).to_have_count(0)
+    page.locator('[data-nav="history"]').click()
+    expect(page.locator('[data-care-check="gentle-wash"]')).to_be_checked()
+    page.locator('[data-care-check="gentle-wash"]').uncheck()
+    expect(page.locator('[data-care-check="gentle-wash"]')).not_to_be_checked()
+    assert_customer_copy(page)
+    page.evaluate("location.hash = 'report'")
+    expect(page.locator(".metric")).to_have_count(4)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://127.0.0.1:8000")
@@ -452,6 +503,7 @@ def main():
         assert_grade_presentation(page)
         assert_customer_copy(page)
 
+        assert_pdf_download(page)
         page.locator('[data-action="save"]').click()
         saved = page.evaluate("key => JSON.parse(localStorage.getItem(key))", KEY)
         assert len(saved) == 1
@@ -460,6 +512,7 @@ def main():
         encoded = json.dumps(saved)
         assert "blob:" not in encoded and "data:image" not in encoded and "synthetic-integration" not in encoded
         screenshot(page, output, "report-desktop.png")
+        assert_care_plan_and_history(page)
 
         # Reopening a prior 256px/zero-excluded record regrades only, not a new inference.
         legacy = json.loads(json.dumps(saved[0]))
@@ -594,7 +647,7 @@ def main():
         "result": "PASS", "models": 4, "three_photo_ms": result["elapsed_ms"],
         "one_photo_ms": one["elapsed_ms"], "configuration_id": result["configuration_id"],
         "checks": "customer-facing wording across public routes, loading/errors and file entry; training-aligned flakes and binary sebum merging, separate sebum chart, preserved legacy three-grade sebum, restored class zero, legacy records, no displayed percentages, guided steps, keyboard navigation, native picker focus/selection/cancel and failed identity refresh, bulk/drop/remove, preserved photos, no premature upload, real inference, "
-                  "mean aggregation, storage/reload, history, 320/390/768 layouts, API failure/retry, file entry",
+                  "mean aggregation, direct PDF download without print dialog, concrete care products, optional-gender generic guidance, dated practice checklist in history, storage/reload, history, 320/390/768 layouts, API failure/retry, file entry",
     }, ensure_ascii=False))
 
 
