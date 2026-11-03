@@ -10,7 +10,7 @@ import sqlite3
 import warnings
 from pathlib import Path
 
-from flask import Flask, g, jsonify, request, send_from_directory
+from flask import Flask, g, jsonify, render_template, request, send_from_directory
 from PIL import Image, ImageOps, UnidentifiedImageError
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 
@@ -96,7 +96,7 @@ def create_app(service=None, database_path=None) -> Flask:
 
     def json_body():
         if request.mimetype != "application/json":
-            raise AccountError("JSON 형식으로 요청해 주세요.", 415)
+            raise AccountError("요청을 처리하지 못했어요. 페이지를 새로고침한 뒤 다시 시도해 주세요.", 415)
         if request.content_length and request.content_length > 512 * 1024:
             raise AccountError("요청 내용이 너무 큽니다.", 413)
         body = request.get_json()
@@ -215,7 +215,7 @@ def create_app(service=None, database_path=None) -> Flask:
         # Local same-origin website only. No permissive CORS for private photos.
         origin = request.headers.get("Origin")
         if origin and origin != request.host_url.rstrip("/"):
-            return jsonify(error="웹 서버 주소에서 사진을 다시 업로드하세요."), 403
+            return jsonify(error="서비스 페이지에서 사진을 다시 선택해 주세요."), 403
         from inference import AnalysisBusy, ModelUnavailable
         images = []
         try:
@@ -231,15 +231,15 @@ def create_app(service=None, database_path=None) -> Flask:
             raise
         except ValueError as exc:
             return jsonify(error=str(exc)), 400
-        except ModelUnavailable as exc:
-            return jsonify(error=str(exc)), 503
+        except ModelUnavailable:
+            return jsonify(error="분석 서비스를 이용할 수 없어요. 잠시 후 다시 시도해 주세요."), 503
         except AnalysisBusy as exc:
             return jsonify(error=str(exc)), 429
         except RequestEntityTooLarge:
             raise
         except Exception:
             app.logger.exception("Inference failed")
-            return jsonify(error="분석 중 오류가 발생했습니다. 서버 로그를 확인한 뒤 다시 시도하세요."), 500
+            return jsonify(error="분석을 마치지 못했어요. 잠시 후 다시 시도해 주세요."), 500
         finally:
             for image in images:
                 image.close()
@@ -251,8 +251,15 @@ def create_app(service=None, database_path=None) -> Flask:
     @app.errorhandler(HTTPException)
     def http_error(exc):
         if request.path.startswith("/api/"):
-            return jsonify(error=exc.description), exc.code
-        return exc
+            messages = {
+                400: "요청 내용을 확인하지 못했어요. 페이지를 새로고침한 뒤 다시 시도해 주세요.",
+                404: "요청하신 기능을 찾을 수 없어요. 페이지를 새로고침해 주세요.",
+                405: "요청을 처리하지 못했어요. 페이지를 새로고침한 뒤 다시 시도해 주세요.",
+            }
+            return jsonify(error=messages.get(exc.code, "요청을 처리하지 못했어요. 잠시 후 다시 시도해 주세요.")), exc.code
+        title = "페이지를 찾을 수 없어요" if exc.code == 404 else "페이지를 열지 못했어요"
+        message = "주소가 바뀌었거나 더 이상 제공되지 않는 페이지예요. 홈에서 원하는 메뉴를 다시 선택해 주세요." if exc.code == 404 else "요청을 처리하지 못했어요. 홈으로 이동한 뒤 다시 시도해 주세요."
+        return render_template("error.html", title=title, message=message), exc.code
 
     @app.after_request
     def response_headers(response):

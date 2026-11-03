@@ -27,7 +27,7 @@ from playwright.sync_api import expect, sync_playwright
 
 from smoke_web import (
     KEY, assert_grade_presentation, assert_layout, assert_result,
-    browser_executable, next_step, ready, screenshot, test_photo, legacy_sebum_metric, set_probabilities,
+    browser_executable, next_step, ready, screenshot, test_photo, legacy_sebum_metric, set_probabilities, assert_customer_copy,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +55,7 @@ def wait_for_server(process, url, logfile):
 def auth_form(page, url, mode, nickname, password, success=True):
     page.goto(url + "/#" + mode)
     expect(page.locator("[data-auth-form]")).to_have_attribute("data-auth-form", mode)
+    assert_customer_copy(page)
     page.locator("#auth-nickname").fill(nickname)
     page.locator("#auth-password").fill(password)
     with page.expect_response(
@@ -72,6 +73,7 @@ def auth_form(page, url, mode, nickname, password, success=True):
     assert not response.ok
     expect(page.locator("#auth-error")).to_be_visible()
     expect(page.locator("#auth-error")).not_to_have_text("")
+    assert_customer_copy(page)
     return None
 
 
@@ -148,7 +150,7 @@ def check_plan_rules(page, result):
 
 
 def run_flow(url, output):
-    nickname, password_a, password_b = "시연검증" + uuid4().hex[:10], "010101", "020202"
+    nickname, password_a, password_b = "회원검증" + uuid4().hex[:10], "010101", "020202"
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True, executable_path=browser_executable())
         context = browser.new_context(base_url=url, viewport={"width": 1280, "height": 1000})
@@ -210,6 +212,7 @@ def run_flow(url, output):
         expect(page.locator(".result-thumbnail")).to_have_count(0)
         expect(page.locator(".metric-value").nth(1)).to_have_text(result["metrics"][1]["label"])
         assert_grade_presentation(page)
+        assert_customer_copy(page)
         screenshot(page, output, "account-report-desktop.png")
 
         page.locator('[data-nav="care"]').click()
@@ -223,6 +226,7 @@ def run_flow(url, output):
         assert pending.value.ok, pending.value.text()
         page.reload()
         expect(page.locator('[data-care-check="gentle-wash"]')).to_be_checked()
+        assert_customer_copy(page)
         screenshot(page, output, "account-care-desktop.png")
         print("Account A record and today's care state persisted after reload.", flush=True)
 
@@ -304,6 +308,7 @@ def run_flow(url, output):
                 expect(page.locator("#main h1")).to_be_visible()
                 expect(page.locator("[data-account-name]")).to_contain_text(nickname)
                 assert_layout(page, output, width, route)
+                assert_customer_copy(page)
                 if width in (390, 1280) and route == "care":
                     screenshot(page, output, "account-care-" + str(width) + ".png")
         logout(page)
@@ -313,6 +318,7 @@ def run_flow(url, output):
                 page.goto(url + "/#" + route)
                 expect(page.locator("[data-auth-form]")).to_be_visible()
                 assert_layout(page, output, width, route)
+                assert_customer_copy(page)
                 if width in (390, 1280):
                     screenshot(page, output, "account-" + route + "-" + str(width) + ".png")
         assert not errors, errors

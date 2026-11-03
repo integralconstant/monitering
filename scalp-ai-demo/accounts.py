@@ -148,7 +148,7 @@ class AccountStore:
         if not isinstance(nickname, str) or not 1 <= len(nickname.strip()) <= 40:
             raise AccountError("닉네임을 1~40자로 입력해 주세요.")
         if not isinstance(password, str) or not 1 <= len(password) <= 128:
-            raise AccountError("시연용 비밀번호를 1~128자로 입력해 주세요.")
+            raise AccountError("비밀번호를 1~128자로 입력해 주세요.")
         return nickname.strip(), password
 
     def register(self, body):
@@ -166,7 +166,7 @@ class AccountStore:
             db.execute("BEGIN IMMEDIATE")
             candidates = db.execute("SELECT password_hash FROM users WHERE nickname=?", (nickname,)).fetchall()
             if any(check_password_hash(row["password_hash"], password) for row in candidates):
-                raise AccountError("같은 닉네임과 시연용 비밀번호로 만든 계정이 있어요. 로그인해 주세요.", 409)
+                raise AccountError("이미 등록된 로그인 정보예요. 로그인해 주세요.", 409)
             cursor = db.execute("INSERT INTO users(nickname,password_hash,created_at,role) VALUES (?,?,?,?)", (nickname, password_hash, int(time.time()), role))
             user = {"id": cursor.lastrowid, "nickname": nickname, "role": role, "result_epoch": 0}
             if role == "admin":
@@ -180,7 +180,7 @@ class AccountStore:
         for row in candidates:
             if check_password_hash(row["password_hash"], password):
                 return {key: row[key] for key in ("id", "nickname", "role", "result_epoch")}
-        raise AccountError("닉네임과 시연용 비밀번호를 다시 확인해 주세요.", 401)
+        raise AccountError("닉네임과 비밀번호를 다시 확인해 주세요.", 401)
 
     def new_session(self, user_id, old_token=None, result_epoch=None):
         token = secrets.token_urlsafe(32)

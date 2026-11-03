@@ -14,7 +14,7 @@ function buildCarePlan(result) {
   });
   if (!observed.length) return { items: [], sources, note };
   const items = [
-    { id: 'gentle-wash', metric_id: null, title: '두피 위주로 부드럽게 씻기', text: '두피가 기름지거나 더러워지는 정도에 맞춰 씻고, 샴푸는 두피 위주로 사용해요.', reason: '모든 등급에서 살펴볼 기본 습관이에요.' },
+    { id: 'gentle-wash', metric_id: null, title: '두피 위주로 부드럽게 씻기', text: '두피가 기름지거나 더러워지는 정도에 맞춰 씻고, 샴푸는 두피 위주로 사용해요.', reason: '매일 살펴볼 기본 관리 습관이에요.' },
     { id: 'low-heat', metric_id: null, title: '수건과 드라이어는 부드럽게', text: '수건으로 물기를 부드럽게 흡수하고, 드라이어를 쓴다면 낮은 온도로 사용해요.', reason: '모발에 가해지는 마찰과 열을 줄여요.' },
     { id: 'observe', metric_id: null, title: '같은 조건으로 다음 기록 남기기', text: '같은 부위와 비슷한 조명에서 사진을 남겨요. 가려움이나 붉어짐 등 직접 느낀 변화도 함께 살펴봐 주세요.', reason: '사진의 분석 등급만으로 상태 변화를 단정하지 않아요.' }
   ];

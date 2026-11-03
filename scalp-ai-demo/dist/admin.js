@@ -42,7 +42,7 @@ function validAdminAction(action) {
     && action.details && typeof action.details === 'object' && !Array.isArray(action.details);
 }
 function adminPage() {
-  const header = intro('시연 운영', '관리자 페이지', '계정과 저장 기록을 정리하고 분석 서비스의 준비 상태를 확인해요.');
+  const header = intro('서비스 관리', '관리자 페이지', '계정과 저장 기록을 정리하고 분석 서비스의 준비 상태를 확인해요.');
   if (state.authLoading) return `${header}<section class="surface empty-state" role="status"><h2>관리자 권한을 확인하고 있어요</h2></section>`;
   if (state.authUnavailable) return `${header}${accountDataError('account')}`;
   if (!isAdmin()) return `${header}<section class="surface empty-state" data-admin-denied><h2>${state.user ? '관리자 계정으로 이용할 수 있어요' : '먼저 관리자 계정으로 로그인해 주세요'}</h2><p>${state.user ? '현재 계정에서는 사진 분석과 내 기록, 맞춤 관리를 이용할 수 있어요.' : '운영자가 만든 관리자 계정으로 로그인하면 관리 화면을 열 수 있어요.'}</p><a class="button" href="${state.user ? '#analysis' : '#login'}">${state.user ? '사진 분석으로 이동' : '로그인하기'}${icon('arrow')}</a></section>`;

@@ -20,7 +20,7 @@ from playwright.sync_api import expect, sync_playwright
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from accounts import AccountStore
-from smoke_web import assert_layout, assert_result, browser_executable, next_step, ready, screenshot, test_photo
+from smoke_web import assert_layout, assert_result, browser_executable, next_step, ready, screenshot, test_photo, assert_customer_copy
 from smoke_accounts import auth_form, wait_for_server
 
 
@@ -47,6 +47,7 @@ def create_analysis(page):
     result = pending.value.json()
     assert_result(result, 1)
     page.wait_for_url("**#report")
+    assert_customer_copy(page)
     with page.expect_response(lambda response: response.url.endswith("/api/records") and response.request.method == "POST") as pending:
         page.locator('[data-action="save"]').click()
     assert pending.value.ok, pending.value.text()
@@ -97,6 +98,7 @@ def run_flow(url, output, users):
         expect(admin.locator("[data-admin-link]")).to_be_visible()
         admin.locator("[data-admin-link]").click()
         expect(admin.locator("[data-admin-dashboard]")).to_be_visible()
+        assert "시연" not in admin.locator("body").inner_text()
         expect(admin.locator("[data-admin-user]")).to_have_count(3)
         expect(admin.locator('[data-admin-count="accounts"]')).to_have_text(re.compile(r"^3(?:개|명)?$"))
         expect(admin.locator('[data-admin-count="records"]')).to_have_text(re.compile(r"^2(?:개|건|회|명)?$"))

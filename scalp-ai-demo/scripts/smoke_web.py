@@ -8,6 +8,7 @@ import base64
 import io
 import json
 import os
+import re
 import time
 import urllib.request
 from pathlib import Path
@@ -116,6 +117,48 @@ def legacy_sebum_metric(metric):
     return set_probabilities(metric, [0.4, 0.35, 0.25])
 
 
+def assert_customer_copy(page):
+    """Audit rendered public text, including screen-reader status, not JS source."""
+    text = page.locator("body").inner_text()
+    development = re.compile(
+        r"시연|데모|테스트|대회용|로컬|이 PC|start\.cmd|localhost|127\.0\.0\.1"
+        r"|서버\s*로그|학습\s*코드|처리\s*설정|학습\s*처리|246810|SCALP_",
+        re.IGNORECASE,
+    )
+    match = development.search(text)
+    assert match is None, (page.url, match.group(0) if match else None, text)
+
+
+def assert_customer_entry_routes(page, url):
+    for route in ("analysis", "history", "care", "guide", "about", "login", "register"):
+        page.goto(url + "/#" + route)
+        page.wait_for_function("!state.authLoading && state.health.status === 'ready'")
+        expect(page.locator("#main h1")).to_be_visible()
+        assert_customer_copy(page)
+    page.goto(url)
+    ready(page)
+
+
+def assert_customer_status_copy(context, url):
+    # A service outage/loading state must not become local installation help.
+    for status in ("loading", "error"):
+        probe = context.new_page()
+        probe.route("**/api/health", lambda route, request, kind=status: route.fulfill(
+            json={"status": kind, "models": [], "message": "Internal integration status"}))
+        probe.goto(url + "/#analysis")
+        expect(probe.locator(".status-panel." + status)).to_be_visible()
+        assert_customer_copy(probe)
+        assert "Internal integration status" not in probe.locator("body").inner_text()
+        probe.close()
+    probe = context.new_page()
+    probe.route("**/api/auth/me", lambda route: route.fulfill(
+        status=503, json={"error": "잠시 후 다시 시도해 주세요."}))
+    probe.goto(url + "/#login")
+    probe.wait_for_function("state.authUnavailable && !state.authLoading")
+    assert_customer_copy(probe)
+    probe.close()
+
+
 def assert_grade_presentation(page):
     text = page.locator("#main").inner_text()
     assert "%" not in text, text
@@ -189,7 +232,8 @@ def assert_sebum_binary_metadata(page, metric):
 
 
 def ready(page):
-    page.wait_for_function("document.querySelector('#server-status').textContent === 'AI 모델 연결됨'")
+    # Service readiness is state, not customer-facing wording.
+    page.wait_for_function("state.health.status === 'ready'")
 
 
 def next_step(page):
@@ -332,11 +376,14 @@ def main():
                 if req.url.endswith("/api/analyze") and req.method == "POST" else None)
         page.goto(url)
         ready(page)
+        assert_customer_entry_routes(page, url)
+        assert_customer_status_copy(context, url)
         expect(page.locator(".sidebar")).to_have_count(0)
         expect(page.locator(".journey")).to_be_visible()
         expect(page.locator('[data-action="analyze"]')).to_have_count(0)
         assert_legacy_grade_mapping(page)
         assert_grade_presentation(page)
+        assert_customer_copy(page)
         screenshot(page, output, "analysis-desktop.png")
 
         # Skipping navigation must keep the current page and move focus to its content.
@@ -386,6 +433,7 @@ def main():
         ) as pending:
             page.locator('[data-action="analyze"]').click()
             expect(page.locator(".loading-panel")).to_be_visible()
+            assert_customer_copy(page)
             assert page.locator('[data-file]:enabled, [data-bulk]:enabled').count() == 0
         response = pending.value
         assert response.ok, response.text()
@@ -402,6 +450,7 @@ def main():
         expect(page.locator(".photo-results tbody tr")).to_have_count(3)
         expect(page.locator(".probability-list")).to_have_count(0)
         assert_grade_presentation(page)
+        assert_customer_copy(page)
 
         page.locator('[data-action="save"]').click()
         saved = page.evaluate("key => JSON.parse(localStorage.getItem(key))", KEY)
@@ -437,13 +486,13 @@ def main():
         expect(page.locator('[data-record]')).to_have_count(2)
         page.locator('[data-record="legacy-before-flakes-training-fix"]').click()
         expect(page.locator('[data-legacy-analysis]')).to_be_visible()
-        expect(page.locator('[data-legacy-analysis]')).to_contain_text("이전 분석 설정")
         expect(page.locator('[data-legacy-analysis]')).to_contain_text("다시 분석")
         expected_legacy_grade = max(range(3), key=result["metrics"][0]["grade_probabilities"].__getitem__)
         expect(page.locator('.metric-value').first).to_have_text(FLAKES_GRADES[expected_legacy_grade])
         expect(page.locator('.metric-value').nth(1)).to_have_text("정상")
         expect(page.locator('[data-legacy-sebum]')).to_be_visible()
-        expect(page.locator('[data-legacy-sebum]')).to_contain_text("이전 피지 모델")
+        expect(page.locator('[data-legacy-sebum]')).to_contain_text("다시 분석")
+        assert_customer_copy(page)
         persisted = page.evaluate("key => JSON.parse(localStorage.getItem(key))", KEY)
         assert persisted[1] == legacy, "Viewing legacy data must not overwrite its raw values"
         page.locator('[data-nav="history"]').click()
@@ -490,6 +539,7 @@ def main():
                 page.goto(url + f"/?layout={width}-{route}#" + route)
                 page.wait_for_function("document.querySelector('#main').children.length > 0")
                 assert_layout(page, output, width, route)
+                assert_customer_copy(page)
             page.locator('[data-nav="history"]').click()
             page.locator("[data-record]").click()
             expect(page.locator(".metric")).to_have_count(4)
@@ -524,23 +574,26 @@ def main():
         page.route("**/api/analyze", lambda route: route.fulfill(status=503, json={"error": "Smoke unavailable"}))
         page.locator('[data-action="analyze"]').click()
         expect(page.locator("#upload-error")).not_to_have_text("")
+        assert_customer_copy(page)
         expect(page.locator('[data-action="analyze"]')).to_be_enabled()
         page.locator('[data-action="back"]').click()
         expect_photos(page, 1)
         page.evaluate("location.hash = 'report'")
         expect(page.locator(".empty-state")).to_have_count(1)
 
-        # Opening the IDE file directly gives a recoverable entry point.
+        # A local HTML entry gives service-address guidance without developer setup commands.
         local = context.new_page()
         local.goto((ROOT / "dist" / "index.html").as_uri())
-        assert "start.cmd" in local.locator("#main").text_content()
+        expect(local.locator(".server-notice")).to_be_visible()
+        assert_customer_copy(local)
+        assert local.locator('a[href*="127.0.0.1"], a[href*="localhost"]').count() == 0
         expect(local.locator('[data-action="analyze"]')).to_have_count(0)
         assert not errors, errors
         browser.close()
     print(json.dumps({
         "result": "PASS", "models": 4, "three_photo_ms": result["elapsed_ms"],
         "one_photo_ms": one["elapsed_ms"], "configuration_id": result["configuration_id"],
-        "checks": "training-aligned flakes and binary sebum merging, separate sebum chart, preserved legacy three-grade sebum, restored class zero, legacy records, no displayed percentages, guided steps, keyboard navigation, native picker focus/selection/cancel and failed identity refresh, bulk/drop/remove, preserved photos, no premature upload, real inference, "
+        "checks": "customer-facing wording across public routes, loading/errors and file entry; training-aligned flakes and binary sebum merging, separate sebum chart, preserved legacy three-grade sebum, restored class zero, legacy records, no displayed percentages, guided steps, keyboard navigation, native picker focus/selection/cancel and failed identity refresh, bulk/drop/remove, preserved photos, no premature upload, real inference, "
                   "mean aggregation, storage/reload, history, 320/390/768 layouts, API failure/retry, file entry",
     }, ensure_ascii=False))
 
